@@ -31,7 +31,7 @@ jobs:
         uses: ros-tooling/action-ros-ci@0.3.5
         with:
           package-name: natnet_ros2
-          target-ros1-distro: ${{ matrix.ros_distribution }}
+          target-ros2-distro: ${{ matrix.ros_distribution }}
           skip-tests: true
       #- name: Setup directories
       #  run: mkdir -p ros_ws/src
