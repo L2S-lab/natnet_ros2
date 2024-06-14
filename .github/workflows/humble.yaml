@@ -16,9 +16,11 @@ jobs:
       matrix:
         ros_distribution:
           - humble
+        docker_image:
+          - ubuntu:jammy
         include:
-          - docker_image: ubuntu:jammy
-            ros_distribution: humble
+          - docker_image: ${{ matrix.docker_image }}
+            ros_distribution: ${{ matrix.ros_distribution }}
             ros_version: 2
     #container:
     #  image: ${{ matrix.docker_image }}
