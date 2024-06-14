@@ -1,9 +1,7 @@
 # NatNet 4 ROS 2 driver (WIP)
 
 [![GitHub Action Status](https://github.com/L2S-lab/natnet_ros2/actions/workflows/humble.yaml/badge.svg?event=push)](https://github.com/L2S-lab/natnet_ros2) 
-
 [![GitHub Action Status](https://github.com/L2S-lab/natnet_ros2/actions/workflows/jazzy.yaml/badge.svg?event=push)](https://github.com/L2S-lab/natnet_ros2) 
-
 [![GitHub Action Status](https://github.com/L2S-lab/natnet_ros2/actions/workflows/foxy.yaml/badge.svg?event=push)](https://github.com/L2S-lab/natnet_ros2) 
 
 <!-- if you are using software for any publication or article, we would be delighted if you could cite it [from here](https://hal.science/hal-04150950). -->
