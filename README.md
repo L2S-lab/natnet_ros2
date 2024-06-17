@@ -4,17 +4,21 @@
 [![GitHub Action Status](https://github.com/L2S-lab/natnet_ros2/actions/workflows/jazzy.yaml/badge.svg?event=push)](https://github.com/L2S-lab/natnet_ros2) 
 [![GitHub Action Status](https://github.com/L2S-lab/natnet_ros2/actions/workflows/foxy.yaml/badge.svg?event=push)](https://github.com/L2S-lab/natnet_ros2) 
 
-<!-- if you are using software for any publication or article, we would be delighted if you could cite it [from here](https://hal.science/hal-04150950). -->
+
+[![Static Badge](https://img.shields.io/badge/hal.science/hal-04150950v2?logo=hal&logoColor=red&label=hal&labelColor=blue&color=red)](https://hal.science/hal-04150950)
+
+It is a continuation of the ROS 1 driver. Which can be found [here](https://github.com/L2S-lab/natnet_ros_cpp).
+
+If you are using software for any publication or article, we would be delighted if you could cite it [from here](https://hal.science/hal-04150950). 
 
 ## Introduction
 This package contains a ROS 2 driver for the NatNet protocol used by the OptiTrack motion capture system. It supports NatNet versions 4.0 (Motive 2.2 and higher). The NatNet SDK provided by the optitrack can be found [here](https://optitrack.com/support/downloads/developer-tools.html#natnet-sdk). It will be downloaded under `deps/NatnetSDK` while building it for the first time. NatNet protocol is used for streaming live motion capture data (rigid bodies, skeletons etc) across the shared network. 
 
-This package is only tested with the Natnet 4.0 and ROS 2 (Foxy and Humble) but probably will work with the other versions of both as well. 
+This package is only tested with the Natnet 4.0 and ROS 2 (Foxy and Humble) but probably will work with the other versions of Motive and ROS 2 as well. 
 
 ### Current Features:
   
  - Easy gui interface to control the node.
- - Stable and with more functionality than [mocap_optitrack](https://github.com/ros-drivers/mocap_optitrack)
  - Rigid bodies are published as `geometry_msgs/PoseStamped` under name given in the Motive, i.e `/natnet_ros/<body-name>/pose`. Plus those are also broadcasting as `tf` frame for rviz
  - Markers of the rigid bodies are published ad `geometry_msgs/PointStamped` unuder the name `/natnet_ros/<body-name>/marker#/pose`
  - Unlabeled markers with the initial position and the name mentione in the `/config/initiate.yaml`are published as `geometry_msgs/PoseStamped` unuder the name `/natnet_ros/<name-in-config-file>/pose`. Plus those are also broadcasting as `tf` frame for rviz. The marker position is updated based on Iterative closest point (nearest neighbour)
