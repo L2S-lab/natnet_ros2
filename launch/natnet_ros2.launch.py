@@ -58,9 +58,10 @@ def node_fn(context,*args, **kwargs):
     ld=[]
     node = LifecycleNode(
         package="natnet_ros2",
-        executable="natnet_ros2",
+        executable="natnet_ros2_node",
         output="screen",
         name=node_name.perform(context),
+        namespace=node_name.perform(context),
         parameters=params,
         #arguments=[
         #        "--ros-args",

@@ -40,7 +40,7 @@ from PyQt5.QtCore import QObject, QThread, pyqtSignal
 
 def kill_subp():
   procs = str(subprocess.check_output(["ps","-a"])).split('\\n')
-  print(procs)
+  #print(procs)
   for i in range(len(procs)-2):
     if "bash <defunct>" in procs[i]:
       pid = None
@@ -53,7 +53,10 @@ def kill_subp():
           subprocess.check_call(["kill","-9",str(pid)])
         except:
           pass
-  subprocess.check_call(["pkill","_ros2_daemon"])
+  try:
+    subprocess.check_call(["pkill","_ros2_daemon"])
+  except:
+    pass
 
 class WorkerThread(QThread):
   finished_signal = pyqtSignal(int)
@@ -180,7 +183,7 @@ class PyQt5Widget(QtWidgets.QMainWindow):
     source /opt/ros/{dist}/setup.bash;
     source {pwd}/install/setup.bash;
     export ROS_DOMAIN_ID={id};
-    ros2 launch natnet_ros_cpp natnet_ros2.launch.py node_name:={name} serverIP:={sip} \
+    ros2 launch natnet_ros2 natnet_ros2.launch.py node_name:={name} serverIP:={sip} \
     clientIP:={cip} serverType:={st} multicastAddress:={mca} \
     serverCommandPort:={scp} serverDataPort:={sdp} global_frame:={gf} \
     remove_latency:={rl} pub_rigid_body:={prb} pub_rigid_body_marker:={prbm} \
@@ -201,7 +204,7 @@ class PyQt5Widget(QtWidgets.QMainWindow):
     command='''
     source /opt/ros/{dist}/setup.bash;
     export ROS_DOMAIN_ID={id};
-    ros2 lifecycle set /{name} shutdown
+    ros2 lifecycle set /{name}/{name} shutdown
     '''.format(dist=self.ros_dist,id=self.id,name=self.name)
     #stop_node_thread = WorkerThread(command)
     #stop_node_thread.start()
