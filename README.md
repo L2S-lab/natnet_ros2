@@ -19,7 +19,7 @@ This package is only tested with the Natnet 4.0 and ROS 2 (Foxy and Humble) but 
 ### Current Features:
   
  - Easy gui interface to control the node.
- - Rigid bodies are published as `geometry_msgs/PoseStamped` under name given in the Motive, i.e `/natnet_ros/<body-name>/pose`. Plus those are also broadcasting as `tf` frame for rviz
+ - Rigid bodies are published as `geometry_msgs/PoseStamped` under name given in the Motive, i.e `/<body-name>/pose`. Plus those are also broadcasting as `tf` frame for rviz
  - Markers of the rigid bodies are published ad `geometry_msgs/PointStamped` unuder the name `/<body-name>/marker#/pose`
  - Unlabeled markers with the initial position and the name mentione in the `/config/initiate.yaml`are published as `geometry_msgs/PoseStamped` or `geometry_msgs/PointStamped` unuder the name `/<name-in-config-file>/pose`. Plus those are also broadcasting as `tf` frame for rviz. The marker position is updated based on Iterative closest point (nearest neighbour)
  - Unlabled markers can be also published as `sensor_msgs/PointCloud`
@@ -74,7 +74,7 @@ ros2 launch natnet_ros2 gui_natnet_ros2.launch.py
 #### Difficult way
 
 Using Non gui approach
-`ros2 launch natnet_ros_cpp natnet_ros2.launch.py`
+`ros2 launch natnet_ros2 natnet_ros2.launch.py`
 
 ##### Understanding the launch file
 Launch file `natnet_ros2.launch.py` contains the several configurable arguments. The details are mentioned in the launch file. Following are several important argument for the connection and the data transfer. Other connection arguments are for the advanced option.
