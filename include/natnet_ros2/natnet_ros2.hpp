@@ -97,6 +97,7 @@ private:
     bool pub_rigid_body = false; // To enable publishing the rigidbody as ros msg
     bool pub_rigid_body_marker = false; // To enable publishing individual markers of rigidbodies
     bool pub_individual_marker = false; // To publish the position of individual markers
+    std::string immt;
     bool pub_pointcloud = false; // To publish all the marker as pointcloud
     bool remove_latency = false; // To remove latency from the frame data published on ros publisher
     bool use_helper_node = false; // flag to chnage parameter while using helper node
@@ -126,7 +127,8 @@ private:
     std::map<int32_t,std::string> ListRigidBodies; 
     std::map<std::string, rclcpp_lifecycle::LifecyclePublisher<geometry_msgs::msg::PoseStamped>::SharedPtr> RigidbodyPub;
     std::map<std::string, rclcpp_lifecycle::LifecyclePublisher<geometry_msgs::msg::PointStamped>::SharedPtr> RigidbodyMarkerPub;
-    std::map<std::string, rclcpp_lifecycle::LifecyclePublisher<geometry_msgs::msg::PoseStamped>::SharedPtr> IndividualMarkerPub;
+    std::map<std::string, rclcpp_lifecycle::LifecyclePublisher<geometry_msgs::msg::PoseStamped>::SharedPtr> IndividualMarkerPosePub;
+    std::map<std::string, rclcpp_lifecycle::LifecyclePublisher<geometry_msgs::msg::PointStamped>::SharedPtr> IndividualMarkerPointPub;
     rclcpp_lifecycle::LifecyclePublisher<sensor_msgs::msg::PointCloud>::SharedPtr PointcloudPub;
     sensor_msgs::msg::PointCloud msgPointcloud;
     std::unique_ptr<tf2_ros::TransformBroadcaster> tfBroadcaster;

@@ -1,23 +1,4 @@
 <?xml version="1.0" encoding="UTF-8"?>
-<!--
-// Copyright 2024 Laboratoire des signaux et systèmes
-//
-// This program is free software: you can redistribute it and/or 
-// modify it under the terms of the GNU General Public License as 
-// published by the Free Software Foundation, either version 3 of 
-// the License, or (at your option) any later version.
-// 
-// This program is distributed in the hope that it will be useful, 
-// but WITHOUT ANY WARRANTY; without even the implied warranty of 
-// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. 
-// See the GNU General Public License for more details.
-//
-// You should have received a copy of the GNU General Public License 
-// along with this program. If not, see <https://www.gnu.org/licenses/>. 
-//
-// Author: Aarsh Thakker <aarsh.thakker@centralesupelec.fr>
--->
-
 <ui version="4.0">
  <class>natnet_helper</class>
  <widget class="QWidget" name="natnet_helper">
@@ -5405,6 +5386,75 @@
                </property>
               </widget>
              </widget>
+            </widget>
+            <widget class="QLabel" name="label_14">
+             <property name="geometry">
+              <rect>
+               <x>10</x>
+               <y>630</y>
+               <width>111</width>
+               <height>21</height>
+              </rect>
+             </property>
+             <property name="font">
+              <font>
+               <weight>50</weight>
+               <bold>false</bold>
+              </font>
+             </property>
+             <property name="text">
+              <string>Message Type</string>
+             </property>
+            </widget>
+            <widget class="QSpinBox" name="msg_type_spin">
+             <property name="enabled">
+              <bool>true</bool>
+             </property>
+             <property name="geometry">
+              <rect>
+               <x>310</x>
+               <y>630</y>
+               <width>41</width>
+               <height>26</height>
+              </rect>
+             </property>
+             <property name="font">
+              <font>
+               <weight>50</weight>
+               <bold>false</bold>
+              </font>
+             </property>
+             <property name="readOnly">
+              <bool>false</bool>
+             </property>
+             <property name="minimum">
+              <number>1</number>
+             </property>
+             <property name="maximum">
+              <number>2</number>
+             </property>
+            </widget>
+            <widget class="QLineEdit" name="textMsgType">
+             <property name="geometry">
+              <rect>
+               <x>110</x>
+               <y>630</y>
+               <width>201</width>
+               <height>25</height>
+              </rect>
+             </property>
+             <property name="font">
+              <font>
+               <weight>50</weight>
+               <bold>false</bold>
+              </font>
+             </property>
+             <property name="text">
+              <string>PoseStamped</string>
+             </property>
+             <property name="readOnly">
+              <bool>true</bool>
+             </property>
             </widget>
            </widget>
           </widget>

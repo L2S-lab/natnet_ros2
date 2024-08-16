@@ -38,6 +38,7 @@ rosidl_generate_interfaces(${PROJECT_NAME}
 
 execute_process(
   COMMAND chmod "+x" "${CMAKE_CURRENT_SOURCE_DIR}/install_sdk.sh"
+  COMMAND chmod "+x" "${CMAKE_CURRENT_SOURCE_DIR}/scripts/helper_node_r2.py"
   WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}
 )
 

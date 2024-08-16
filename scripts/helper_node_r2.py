@@ -82,6 +82,8 @@ class PyQt5Widget(QtWidgets.QMainWindow):
 
     self.ros_dist = os.environ['ROS_DISTRO']
     self.pwd = os.environ['PWD']
+    self.msg_types = ["PoseStamped","PointStamped"]
+    self.im_msg_type = self.msg_types[0]
     if os.path.exists(os.path.join(PKG_PATH, 'config','conf_autogen.yaml')):
       self.config_file = os.path.join(PKG_PATH, 'config','conf_autogen.yaml')
     self.name = 'natnet_ros2'
@@ -90,6 +92,7 @@ class PyQt5Widget(QtWidgets.QMainWindow):
                       "pub_rigid_body_marker": False,
                       "pub_pointcloud": False,
                       "pub_rigid_body_wmc": False,
+                      "individual_marker_msg_type": "PoseStamped",
                       }
     self.log_params = {"log_internals": False,
                       "log_frames": False,
@@ -144,6 +147,7 @@ class PyQt5Widget(QtWidgets.QMainWindow):
     self.pub_rbm.setEnabled(False)
     self.domain_id_spin.valueChanged.connect(self.select_network)
     self.client_ip_spin.valueChanged.connect(self.spin_clientIP)
+    self.msg_type_spin.valueChanged.connect(self.spin_msg_type)
     self.multicast_radio.clicked.connect(self.clicked_multicast)
     self.unicast_radio.clicked.connect(self.clicked_unicast)
     self.start_node.clicked.connect(self.start)
@@ -188,14 +192,15 @@ class PyQt5Widget(QtWidgets.QMainWindow):
     serverCommandPort:={scp} serverDataPort:={sdp} global_frame:={gf} \
     remove_latency:={rl} pub_rigid_body:={prb} pub_rigid_body_marker:={prbm} \
     pub_individual_marker:={pim} pub_pointcloud:={ppc} log_internals:={li} \
-    log_frames:={lf} log_latencies:={ll} conf_file:={cf} activate:={activate}
+    log_frames:={lf} log_latencies:={ll} conf_file:={cf} activate:={activate} \
+    immt:={immt}
     '''.format(dist=self.ros_dist,id=self.id, pwd=self.pwd, name=self.name, sip=self.conn_params["serverIP"],
               cip=self.conn_params["clientIP"],st=self.conn_params["serverType"],mca=self.conn_params["multicastAddress"],
               scp=self.conn_params["serverCommandPort"],sdp=self.conn_params["serverDataPort"],gf=self.conn_params["globalFrame"],
               rl=False,prb=self.pub_params["pub_rigid_body"],prbm=self.pub_params["pub_rigid_body_marker"],
               pim=self.pub_params["pub_individual_marker"],ppc=self.pub_params["pub_pointcloud"],
               li=self.log_params["log_internals"],lf=self.log_params["log_frames"],ll=self.log_params["log_latencies"],
-              cf='conf_autogen.yaml',activate=True)
+              cf='conf_autogen.yaml',activate=True,immt=self.pub_params["individual_marker_msg_type"])
     self.start_node_thread = WorkerThread(command)
     self.start_node_thread.start()
 
@@ -204,7 +209,7 @@ class PyQt5Widget(QtWidgets.QMainWindow):
     command='''
     source /opt/ros/{dist}/setup.bash;
     export ROS_DOMAIN_ID={id};
-    ros2 lifecycle set /{name}/{name} shutdown
+    ros2 lifecycle set /{name} shutdown
     '''.format(dist=self.ros_dist,id=self.id,name=self.name)
     #stop_node_thread = WorkerThread(command)
     #stop_node_thread.start()
@@ -268,6 +273,9 @@ class PyQt5Widget(QtWidgets.QMainWindow):
   
   def pub_rbwmc_setting(self):
     self.Log('info','This functionality is not supported yet.')
+    
+  def pub_immt_setting(self):
+    self.pub_params["individual_marker_msg_type"] = self.im_msg_type
 
 #----------------------------------------------------------------------------------------
 # NETWORK SELECTION THINGS
@@ -335,6 +343,10 @@ class PyQt5Widget(QtWidgets.QMainWindow):
     self.textServerIP.setText('.'.join(str(self.IP_LIST[self.client_ip_spin.value()-1]).split('.')[:-1],)+'.')
     self.Log('info','setting client ip '+str(self.conn_params["clientIP"]))
 
+  def spin_msg_type(self):
+    self.textMsgType.setText(self.msg_types[self.msg_type_spin.value()-1])
+    self.im_msg_type = self.msg_types[self.msg_type_spin.value()-1]
+
   def get_node_name(self):
     self.name = self.textNodeName.text()
     if self.name=='':
@@ -377,6 +389,7 @@ class PyQt5Widget(QtWidgets.QMainWindow):
     self.pub_rb_setting()
     self.pub_rbm_setting()
     self.pub_pc_setting()
+    self.pub_immt_setting()
     self.pub_params["pub_rigid_body_wmc"] = False
     self.log_frames_setting()
     self.log_internal_setting()
@@ -400,6 +413,7 @@ class PyQt5Widget(QtWidgets.QMainWindow):
       self.z_position = z_position
 
   def yaml_dump(self):
+    self.im_msg_type = self.msg_types[self.msg_type_spin.value()-1]
     empty=0
     object_names={'object_names':[]}
     if self.num_of_markers!=0:

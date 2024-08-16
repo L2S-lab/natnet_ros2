@@ -32,6 +32,7 @@ NatNetNode::NatNetNode(rclcpp::NodeOptions& node_options) : LifecycleNode("natne
     declare_parameter<bool>("pub_rigid_body_marker", false);
     declare_parameter<bool>("pub_individual_marker", false);
     declare_parameter<bool>("pub_pointcloud", false);
+    declare_parameter<std::string>("individual_marker_msg_type","PoseStamped");
     declare_parameter<std::string>("global_frame", "world");
     declare_parameter<bool>("remove_latency",false);
     declare_parameter<std::string>("serverIP", "192.168.0.100");
@@ -62,11 +63,11 @@ void NatNetNode::get_node_params()
     pub_rigid_body_marker = get_parameter("pub_rigid_body_marker").as_bool();
     pub_individual_marker = get_parameter("pub_individual_marker").as_bool();
     pub_pointcloud = get_parameter("pub_pointcloud").as_bool();
+    immt = get_parameter("individual_marker_msg_type").as_string();
     global_frame = get_parameter("global_frame").as_string();
     remove_latency = get_parameter("remove_latency").as_bool();
     if (pub_individual_marker)
     {
-        
         declare_parameter<std::vector<std::string>>("object_names", {});
         object_names = get_parameter("object_names").as_string_array();
         if(object_names.size()>0)
@@ -330,7 +331,11 @@ void NatNetNode::get_info()
         {
             for (int i=0; i<(int) object_list.size(); i++)
             {
-                IndividualMarkerPub[object_list[i].name] = create_publisher<geometry_msgs::msg::PoseStamped>(object_list[i].name+"/pose", rclcpp::QoS(1000));
+            	if (immt=="PoseStamped")
+                    {IndividualMarkerPosePub[object_list[i].name] = create_publisher<geometry_msgs::msg::PoseStamped>(object_list[i].name+"/pose", rclcpp::QoS(1000));};
+                if (immt=="PointStamped")
+                    {IndividualMarkerPointPub[object_list[i].name] = create_publisher<geometry_msgs::msg::PointStamped>(object_list[i].name+"/pose", rclcpp::QoS(1000));};
+                
             }
         }
     }
@@ -447,18 +452,31 @@ void NatNetNode::process_individual_marker(sMarker &data)
         object_list[update].x = data.x;
         object_list[update].y = data.y;
         object_list[update].z = data.z;
-    
-        geometry_msgs::msg::PoseStamped msgMarkerPose;
-        msgMarkerPose.header.frame_id = global_frame;
-        msgMarkerPose.header.stamp = remove_latency ? this->get_clock()->now()-frame_delay : this->get_clock()->now();
-        msgMarkerPose.pose.position.x = data.x;
-        msgMarkerPose.pose.position.y = data.y;
-        msgMarkerPose.pose.position.z = data.z;
-        msgMarkerPose.pose.orientation.x = 0.0;
-        msgMarkerPose.pose.orientation.y = 0.0;
-        msgMarkerPose.pose.orientation.z = 0.0;
-        msgMarkerPose.pose.orientation.w = 1.0;
-        IndividualMarkerPub[object_list[update].name]->publish(msgMarkerPose);
+    	if (immt=="PoseStamped")
+        {    
+            geometry_msgs::msg::PoseStamped msgMarkerPose;
+            msgMarkerPose.header.frame_id = global_frame;
+            msgMarkerPose.header.stamp = remove_latency ? this->get_clock()->now()-frame_delay : this->get_clock()->now();
+            msgMarkerPose.pose.position.x = data.x;
+            msgMarkerPose.pose.position.y = data.y;
+            msgMarkerPose.pose.position.z = data.z;
+            msgMarkerPose.pose.orientation.x = 0.0;
+            msgMarkerPose.pose.orientation.y = 0.0;
+            msgMarkerPose.pose.orientation.z = 0.0;
+            msgMarkerPose.pose.orientation.w = 1.0;
+            IndividualMarkerPosePub[object_list[update].name]->publish(msgMarkerPose);
+        }
+        
+        if (immt=="PointStamped")
+        {    
+            geometry_msgs::msg::PointStamped msgMarkerPose;
+            msgMarkerPose.header.frame_id = global_frame;
+            msgMarkerPose.header.stamp = remove_latency ? this->get_clock()->now()-frame_delay : this->get_clock()->now();
+            msgMarkerPose.point.x = data.x;
+            msgMarkerPose.point.y = data.y;
+            msgMarkerPose.point.z = data.z;
+            IndividualMarkerPointPub[object_list[update].name]->publish(msgMarkerPose);
+        }
 
         // creating tf frame to visualize in the rviz
         geometry_msgs::msg::TransformStamped msgTFMarker;
@@ -506,7 +524,8 @@ void NatNetNode::del_info()
     ListRigidBodies.clear();
     RigidbodyPub.clear();
     RigidbodyMarkerPub.clear();
-    IndividualMarkerPub.clear();
+    IndividualMarkerPosePub.clear();
+    IndividualMarkerPointPub.clear();
 }
 
 CallbackReturnT NatNetNode::on_configure(const rclcpp_lifecycle::State & state)
@@ -539,7 +558,11 @@ CallbackReturnT NatNetNode::on_activate(const rclcpp_lifecycle::State & state)
     }
     if(pub_individual_marker)
     {
-        for(auto const& i: IndividualMarkerPub)
+        for(auto const& i: IndividualMarkerPosePub)
+        {
+            i.second->on_activate();
+        }
+        for (auto const& i: IndividualMarkerPointPub)
         {
             i.second->on_activate();
         }
