@@ -20,8 +20,8 @@ This package is only tested with the Natnet 4.0 and ROS 2 (Foxy and Humble) but 
   
  - Easy gui interface to control the node.
  - Rigid bodies are published as `geometry_msgs/PoseStamped` under name given in the Motive, i.e `/natnet_ros/<body-name>/pose`. Plus those are also broadcasting as `tf` frame for rviz
- - Markers of the rigid bodies are published ad `geometry_msgs/PointStamped` unuder the name `/natnet_ros/<body-name>/marker#/pose`
- - Unlabeled markers with the initial position and the name mentione in the `/config/initiate.yaml`are published as `geometry_msgs/PoseStamped` unuder the name `/natnet_ros/<name-in-config-file>/pose`. Plus those are also broadcasting as `tf` frame for rviz. The marker position is updated based on Iterative closest point (nearest neighbour)
+ - Markers of the rigid bodies are published ad `geometry_msgs/PointStamped` unuder the name `/<body-name>/marker#/pose`
+ - Unlabeled markers with the initial position and the name mentione in the `/config/initiate.yaml`are published as `geometry_msgs/PoseStamped` or `geometry_msgs/PointStamped` unuder the name `/<name-in-config-file>/pose`. Plus those are also broadcasting as `tf` frame for rviz. The marker position is updated based on Iterative closest point (nearest neighbour)
  - Unlabled markers can be also published as `sensor_msgs/PointCloud`
  - Different options for publishing and logging the data
 
@@ -90,13 +90,6 @@ The file contains the details on what to modify.
 The question might arise on how to check the position of the single marker. For that, you can log the frames of the incoming data in the terminal. To do so, enable the `log_frames` in the launch file.
 
 After configuring the `initiate.yaml`, in the launch file, enable the `pub_individual_marker`. Change the name of the config file in the argument `conf_file` if needed and launch the file.
-
-##### Replacing existing package
-You can easily replace the current package with this package. In the `natnet_ros2.launch.py` use the name of node to the node you currently using. For an example, 
-If you are using the `vrpn_client_node`, you can launch the node as follows.
-```
-ros2 launch natnet_ros_cpp natnet_ros2.launch.py name:=vrpn_client_node
-```
 
 <!-- ## Citation
 If you use this software, please consider citing it [from here](https://hal.science/hal-04150950) -->
