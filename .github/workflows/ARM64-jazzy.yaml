@@ -1,4 +1,4 @@
-name: humble
+name: ARM64-jazzy
 
 on:
   pull_request:
@@ -9,16 +9,16 @@ on:
       - main
           
 jobs:
-  humble-devel-ci:
-    runs-on: ubuntu-22.04
+  jazzy-devel-ci:
+    runs-on: ubuntu-24.04
     strategy:
       fail-fast: false
       matrix:
         ros_distribution:
-          - humble
+          - jazzy
         include:
-          - docker_image: osrf/ros:humble-desktop
-            ros_distribution: humble
+          - docker_image: arm64v8/ros:jazzy
+            ros_distribution: jazzy
             ros_version: 2
     container:
       image: ${{ matrix.docker_image }}

@@ -1,4 +1,4 @@
-name: jazzy
+name: AMD64-jazzy
 
 on:
   pull_request:

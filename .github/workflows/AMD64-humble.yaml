@@ -1,4 +1,4 @@
-name: foxy
+name: AMD64-humble
 
 on:
   pull_request:
@@ -9,16 +9,16 @@ on:
       - main
           
 jobs:
-  foxy-devel-ci:
-    runs-on: ubuntu-20.04
+  humble-devel-ci:
+    runs-on: ubuntu-22.04
     strategy:
       fail-fast: false
       matrix:
         ros_distribution:
-          - foxy
+          - humble
         include:
-          - docker_image: osrf/ros:foxy-desktop
-            ros_distribution: foxy
+          - docker_image: osrf/ros:humble-desktop
+            ros_distribution: humble
             ros_version: 2
     container:
       image: ${{ matrix.docker_image }}
