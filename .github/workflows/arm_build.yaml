@@ -1,0 +1,53 @@
+name: humble
+
+on:
+  pull_request:
+    branches:
+      - main
+  push:
+    branches:
+      - main
+          
+jobs:
+  humble-devel-ci:
+    runs-on: ubuntu-22.04
+    strategy:
+      fail-fast: false
+      matrix:
+        ros_distribution:
+          - humble
+        # The docker image needs to be ARM64
+        docker_image:
+          - arm64v8/ubuntu:jammy
+
+    # The container must be specified to run the build in an ARM64 environment
+    container:
+      image: ${{ matrix.docker_image }}
+      # Pass an environment variable to ensure ROS tooling uses a compatible Python version
+      env:
+        LANG: C.UTF-8
+
+    steps:
+      # Step 1: Set up QEMU to emulate ARM64 architecture on the x86_64 runner
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v3
+        with:
+          platforms: arm64
+
+      # Step 2: Setup ROS 2 inside the ARM64 container
+      # This action will detect it's in a container and set up the ROS environment
+      - name: Setup ROS 2
+        uses: ros-tooling/setup-ros@0.7.1
+        with:
+          required-ros-distributions: ${{ matrix.ros_distribution }}
+
+      # Step 3: Use the standard ROS CI action to build and test
+      # This action will automatically check out the code and run the build
+      - name: Build and Test
+        uses: ros-tooling/action-ros-ci@0.3.5
+        with:
+          package-name: natnet_ros2
+          target-ros2-distro: ${{ matrix.ros_distribution }}
+          # The underlying build command will run inside the ARM64 container,
+          # thus compiling for an ARM target
+          skip-tests: true
