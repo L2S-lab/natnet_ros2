@@ -16,30 +16,31 @@ jobs:
       matrix:
         ros_distribution:
           - humble
-        docker_image:
-          - ubuntu:jammy
         include:
-          - docker_image: ubuntu:jammy
+          - docker_image: osrf/ros:humble-desktop
             ros_distribution: humble
             ros_version: 2
-    #container:
-    #  image: ${{ matrix.docker_image }}
+    container:
+      image: ${{ matrix.docker_image }}
     steps:
-      - name: Setup ROS 2
-        uses: ros-tooling/setup-ros@0.7.9
+      - name: checkout
+        uses: actions/checkout@v3
         with:
-          required-ros-distributions: ${{ matrix.ros_distribution }}
-      - name: Build and Test
-        uses: ros-tooling/action-ros-ci@0.3.14
-        with:
-          package-name: natnet_ros2
-          target-ros2-distro: ${{ matrix.ros_distribution }}
-          skip-tests: true
-      #- name: Setup directories
-      #  run: mkdir -p ros_ws/src
-      #- name: checkout
-      #  uses: actions/checkout@v3
-      #  with:
-      #    path: ros_ws/src
-      
-      
+          path: src/natnet_ros2
+
+      - name: Install dependencies
+        run: |
+          apt-get update
+          rosdep update
+          rosdep install --from-paths src --ignore-src -y
+
+      - name: Build
+        run: |
+          . /opt/ros/${{ matrix.ros_distribution }}/setup.sh
+          colcon build --symlink-install --packages-select natnet_ros2 
+
+      # - name: Test
+      #   run: |
+      #     . /opt/ros/${{ matrix.ros_distribution }}/setup.sh
+      #     colcon test --packages-select natnet_ros2
+      #     colcon test-result --verbose

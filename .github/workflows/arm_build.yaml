@@ -1,4 +1,4 @@
-name: humble
+name: humble-arm-build
 
 on:
   pull_request:
@@ -7,38 +7,32 @@ on:
   push:
     branches:
       - main
-          
+
 jobs:
-  humble-devel-ci:
+  humble-arm-ci:
     runs-on: ubuntu-22.04
     strategy:
       fail-fast: false
       matrix:
         ros_distribution:
           - humble
-        # The docker image needs to be ARM64
-        docker_image:
-          - arm64v8/ubuntu:jammy
 
     steps:
-      - uses: actions/checkout@v4
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v3
+        with:
+          platforms: arm64
 
       - name: Build and Test on ARM64
-        uses: uraimo/run-on-arch-action@v2
-        with:
-          arch: aarch64
-          distro: ubuntu22.04
-          githubToken: ${{ github.token }}
-          install: |
-            apt-get update && apt-get install -y curl gnupg2 lsb-release
-            curl -sSL https://raw.githubusercontent.com/ros/rosdistro/master/ros.key -o /usr/share/keyrings/ros-archive-keyring.gpg
-            echo "deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/ros-archive-keyring.gpg] http://packages.ros.org/ros2/ubuntu $(lsb_release -cs) main" | tee /etc/apt/sources.list.d/ros2.list > /dev/null
-            apt-get update
-            apt-get install -y ros-${{ matrix.ros_distribution }}-ros-base python3-colcon-common-extensions
-            apt-get install -y build-essential
-          run: |
-            source /opt/ros/${{ matrix.ros_distribution }}/setup.sh
-            mkdir -p colcon_ws/src
-            cp -r . colcon_ws/src/natnet_ros2
-            cd colcon_ws
-            colcon build --symlink-install --packages-select natnet_ros2
+        run: |
+          docker run --rm -v ${{ github.workspace }}:/ws/src/natnet_ros2 --platform linux/arm64 \
+            ros:${{ matrix.ros_distribution }}-ros-base \
+            /bin/bash -c " \
+              source /opt/ros/${{ matrix.ros_distribution }}/setup.bash && \
+              cd /ws && \
+              apt-get update && rosdep install -i --from-path src --rosdistro ${{ matrix.ros_distribution }} -y && \
+              colcon build --symlink-install --packages-select natnet_ros2 \
+            "
