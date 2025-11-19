@@ -29,7 +29,7 @@ jobs:
       - name: Build and Test on ARM64
         run: |
           docker run --rm -v ${{ github.workspace }}:/ws/src/natnet_ros2 --platform linux/arm64 \
-            ros:${{ matrix.ros_distribution }}-ros-base \
+            ros:${{ matrix.ros_distribution }}-ros-dev \
             /bin/bash -c " \
               source /opt/ros/${{ matrix.ros_distribution }}/setup.bash && \
               cd /ws && \
