@@ -486,10 +486,10 @@ void NatNetNode::process_individual_marker(sMarker &data)
         msgTFMarker.transform.translation.x = data.x;
         msgTFMarker.transform.translation.y = data.y;
         msgTFMarker.transform.translation.z = data.z;
-        msgTFMarker.transform.rotation.x = 0;
-        msgTFMarker.transform.rotation.y = 0;
-        msgTFMarker.transform.rotation.z = 0;
-        msgTFMarker.transform.rotation.w = 1;
+        msgTFMarker.transform.rotation.x = 0.0;
+        msgTFMarker.transform.rotation.y = 0.0;
+        msgTFMarker.transform.rotation.z = 0.0;
+        msgTFMarker.transform.rotation.w = 1.0;
         tfBroadcaster->sendTransform(msgTFMarker);
     }
 }

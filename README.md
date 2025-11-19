@@ -1,8 +1,9 @@
 # NatNet 4 ROS 2 driver (WIP)
 
-[![GitHub Action Status](https://github.com/L2S-lab/natnet_ros2/actions/workflows/humble.yaml/badge.svg?event=push)](https://github.com/L2S-lab/natnet_ros2) 
-[![GitHub Action Status](https://github.com/L2S-lab/natnet_ros2/actions/workflows/jazzy.yaml/badge.svg?event=push)](https://github.com/L2S-lab/natnet_ros2) 
-[![GitHub Action Status](https://github.com/L2S-lab/natnet_ros2/actions/workflows/foxy.yaml/badge.svg?event=push)](https://github.com/L2S-lab/natnet_ros2) 
+[![GitHub Action Status](https://github.com/L2S-lab/natnet_ros2/actions/workflows/AMD64-humble.yaml/badge.svg?event=push)](https://github.com/L2S-lab/natnet_ros2) 
+[![GitHub Action Status](https://github.com/L2S-lab/natnet_ros2/actions/workflows/AMD64-jazzy.yaml/badge.svg?event=push)](https://github.com/L2S-lab/natnet_ros2) 
+[![GitHub Action Status](https://github.com/L2S-lab/natnet_ros2/actions/workflows/ARM64-humble.yaml/badge.svg?event=push)](https://github.com/L2S-lab/natnet_ros2) 
+[![GitHub Action Status](https://github.com/L2S-lab/natnet_ros2/actions/workflows/ARM64-jazzy.yaml/badge.svg?event=push)](https://github.com/L2S-lab/natnet_ros2) 
 
 
 [![Static Badge](https://img.shields.io/badge/hal.science/hal-04150950v2?logo=hal&logoColor=red&label=hal&labelColor=blue&color=red)](https://hal.science/hal-04150950)
