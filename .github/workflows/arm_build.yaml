@@ -20,34 +20,25 @@ jobs:
         docker_image:
           - arm64v8/ubuntu:jammy
 
-    # The container must be specified to run the build in an ARM64 environment
-    container:
-      image: ${{ matrix.docker_image }}
-      # Pass an environment variable to ensure ROS tooling uses a compatible Python version
-      env:
-        LANG: C.UTF-8
-
     steps:
-      # Step 1: Set up QEMU to emulate ARM64 architecture on the x86_64 runner
-      - name: Set up QEMU
-        uses: docker/setup-qemu-action@v3
-        with:
-          platforms: arm64
+      - uses: actions/checkout@v4
 
-      # Step 2: Setup ROS 2 inside the ARM64 container
-      # This action will detect it's in a container and set up the ROS environment
-      - name: Setup ROS 2
-        uses: ros-tooling/setup-ros@0.7.1
+      - name: Build and Test on ARM64
+        uses: uraimo/run-on-arch-action@v2
         with:
-          required-ros-distributions: ${{ matrix.ros_distribution }}
-
-      # Step 3: Use the standard ROS CI action to build and test
-      # This action will automatically check out the code and run the build
-      - name: Build and Test
-        uses: ros-tooling/action-ros-ci@0.3.5
-        with:
-          package-name: natnet_ros2
-          target-ros2-distro: ${{ matrix.ros_distribution }}
-          # The underlying build command will run inside the ARM64 container,
-          # thus compiling for an ARM target
-          skip-tests: true
+          arch: aarch64
+          distro: ubuntu22.04
+          githubToken: ${{ github.token }}
+          install: |
+            apt-get update && apt-get install -y curl gnupg2 lsb-release
+            curl -sSL https://raw.githubusercontent.com/ros/rosdistro/master/ros.key -o /usr/share/keyrings/ros-archive-keyring.gpg
+            echo "deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/ros-archive-keyring.gpg] http://packages.ros.org/ros2/ubuntu $(lsb_release -cs) main" | tee /etc/apt/sources.list.d/ros2.list > /dev/null
+            apt-get update
+            apt-get install -y ros-${{ matrix.ros_distribution }}-ros-base python3-colcon-common-extensions
+            apt-get install -y build-essential
+          run: |
+            source /opt/ros/${{ matrix.ros_distribution }}/setup.sh
+            mkdir -p colcon_ws/src
+            cp -r . colcon_ws/src/natnet_ros2
+            cd colcon_ws
+            colcon build --symlink-install --packages-select natnet_ros2

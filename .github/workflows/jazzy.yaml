@@ -26,11 +26,11 @@ jobs:
     #  image: ${{ matrix.docker_image }}
     steps:
       - name: Setup ROS 2
-        uses: ros-tooling/setup-ros@0.7.7
+        uses: ros-tooling/setup-ros@0.7.9
         with:
           required-ros-distributions: ${{ matrix.ros_distribution }}
       - name: Build and Test
-        uses: ros-tooling/action-ros-ci@v0.3
+        uses: ros-tooling/action-ros-ci@0.3.14
         with:
           package-name: natnet_ros2
           target-ros2-distro: ${{ matrix.ros_distribution }}
