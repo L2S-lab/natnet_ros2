@@ -30,6 +30,10 @@ from natnet_ros2_py.node_module import HelperNode
 import subprocess
 import os
 import re
+import signal
+import threading
+import time
+import traceback
 import yaml
 
 from PyQt5 import QtWidgets, uic
@@ -38,36 +42,52 @@ import sys
 from PyQt5 import QtGui, QtWidgets
 from PyQt5.QtCore import QObject, QThread, pyqtSignal
 
-def kill_subp():
-  procs = str(subprocess.check_output(["ps","-a"])).split('\\n')
-  #print(procs)
-  for i in range(len(procs)-2):
-    if "bash <defunct>" in procs[i]:
-      pid = None
-      if "ros2" in procs[i+1]:
-        pid = procs[i+1].split(' ')[1]
-      if "ros2" in procs[i+2]:
-        pid = procs[i+1].split(' ')[1]
-      if pid!=None:
-        try:
-          subprocess.check_call(["kill","-9",str(pid)])
-        except:
-          pass
-  try:
-    subprocess.check_call(["pkill","_ros2_daemon"])
-  except:
-    pass
-
 class WorkerThread(QThread):
+  started_signal = pyqtSignal(int, int)
+  log_line_signal = pyqtSignal(str, str)
   finished_signal = pyqtSignal(int)
-  def __init__(self, cmd) -> None:
+  def __init__(self, cmd, env=None, cwd=None) -> None:
     super().__init__()
-      
+
     self.cmd = cmd
+    self.env = env
+    self.cwd = cwd
+    self.proc = None
+
+  def _stream(self, stream, level):
+    try:
+      for line in iter(stream.readline, ''):
+        log_line = line.rstrip('\n')
+        if log_line:
+          self.log_line_signal.emit(level, log_line)
+    finally:
+      stream.close()
 
   def run(self):
-    proc = subprocess.run(self.cmd,shell=True,executable='/bin/bash')
-    self.finished_signal.emit(proc.returncode)
+    try:
+      self.proc = subprocess.Popen(
+        self.cmd,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        bufsize=1,
+        env=self.env,
+        cwd=self.cwd,
+        preexec_fn=os.setsid,
+      )
+      self.started_signal.emit(self.proc.pid, os.getpgid(self.proc.pid))
+      stdout_thread = threading.Thread(target=self._stream, args=(self.proc.stdout, 'INFO'), daemon=True)
+      stderr_thread = threading.Thread(target=self._stream, args=(self.proc.stderr, 'ERROR'), daemon=True)
+      stdout_thread.start()
+      stderr_thread.start()
+      rc = self.proc.wait()
+      stdout_thread.join(timeout=1.0)
+      stderr_thread.join(timeout=1.0)
+      self.finished_signal.emit(rc)
+    except Exception as e:
+      self.log_line_signal.emit('ERROR', f'Failed to run launch command: {e}')
+      self.log_line_signal.emit('ERROR', traceback.format_exc().strip())
+      self.finished_signal.emit(-1)
 
 class PyQt5Widget(QtWidgets.QMainWindow):
   def __init__(self,node:Node):
@@ -81,7 +101,7 @@ class PyQt5Widget(QtWidgets.QMainWindow):
     self.setWindowIcon(QtGui.QIcon(os.path.join(PKG_PATH,'ui','logo.png')))
 
     self.ros_dist = os.environ['ROS_DISTRO']
-    self.pwd = os.environ['PWD']
+    self.pwd = os.getcwd()
     self.msg_types = ["PoseStamped","PointStamped"]
     self.im_msg_type = self.msg_types[0]
     if os.path.exists(os.path.join(PKG_PATH, 'config','conf_autogen.yaml')):
@@ -113,11 +133,17 @@ class PyQt5Widget(QtWidgets.QMainWindow):
     self.y_position=None
     self.z_position=None
     self.id = 0
+    self.launch_proc = None
+    self.launch_pgid = None
+    self.is_running = False
+    self.start_node_thread = None
+    self.client_ip_raw = None
+    self.server_ip_raw = None
     
     self.outputBox.append("""<div style="color: #ff8c00">[NOTE]</div>""")
     self.outputBox.append('- This prompt does not show all the errors. For full error, check the terminal where this node has been excecuted')
     self.outputBox.append('- It is required to launch the node from your main workspace folder where this package has been built')
-    self.outputBox.append('- Stopping node is done by killing PID because of issue with lifecycle node shutdown process')
+    self.outputBox.append('- Stop only affects the launch process started by this GUI session.')
     self.Log('info',' If your WIFI or LAN IP is not detected in the list of the network, You can use the remote IP option and add the ip address manually.')
     self.Log('info',' rosmaster will be selected initially based on the environment variables. You can change it anytime. Provided rosmaster will be used to run the main natnet node.')
     #self.Log('info',' ')
@@ -129,25 +155,32 @@ class PyQt5Widget(QtWidgets.QMainWindow):
 
     for data in IP_data:
       try:
-        _ip = [ t for t in data.split() if t.startswith('ip') ]
-        self.outputBox.append("""<div style="color: #656565">[INFO]</div>""" +'Found the connection on the IP ending with ' + str(_ip[0].split('.')[-1]) )
-        self.IP_LIST.append(_ip[0].replace('ip',''))
-      except:
-        pass
+        detected_ips = re.findall(r"(?:\d{1,3}\.){3}\d{1,3}", data)
+        if len(detected_ips) == 0:
+          continue
+        detected_ip = detected_ips[0]
+        self.Log('info', 'Found the connection on IP ' + self._mask_ip_for_gui(detected_ip))
+        self.IP_LIST.append(detected_ip)
+      except Exception as e:
+        self._log_exception('Failed to parse network interface details', e)
 
     del IP_data
     if len(self.IP_LIST)>0:
       self.client_ip_spin.setEnabled(True)
       self.client_ip_spin.setMinimum(1)
-      self.textClientIP.setText(str(self.IP_LIST[self.client_ip_spin.value()-1]))
-      self.textServerIP.setText('.'.join(str(self.IP_LIST[self.client_ip_spin.value()-1]).split('.')[:-1],)+'.')
-      self.conn_params["clientIP"] = str(self.IP_LIST[self.client_ip_spin.value()-1])
+      default_client_ip = str(self.IP_LIST[self.client_ip_spin.value()-1])
+      self.client_ip_raw = default_client_ip
+      self.textClientIP.setText(self._mask_ip_for_gui(default_client_ip))
+      self.textServerIP.setText(self._masked_server_hint_from_client(default_client_ip))
+      self.conn_params["clientIP"] = default_client_ip
     self.client_ip_spin.setMaximum(len(self.IP_LIST))
 
     self.pub_rbm.setEnabled(False)
     self.domain_id_spin.valueChanged.connect(self.select_network)
     self.client_ip_spin.valueChanged.connect(self.spin_clientIP)
     self.msg_type_spin.valueChanged.connect(self.spin_msg_type)
+    self.textClientIP.editingFinished.connect(self._apply_client_ip_visual_mask)
+    self.textServerIP.editingFinished.connect(self._apply_server_ip_visual_mask)
     self.multicast_radio.clicked.connect(self.clicked_multicast)
     self.unicast_radio.clicked.connect(self.clicked_unicast)
     self.start_node.clicked.connect(self.start)
@@ -164,65 +197,272 @@ class PyQt5Widget(QtWidgets.QMainWindow):
     self.push_ok.clicked.connect(self.yaml_dump)
 
   def Log(self,type:str="",msg=''):
+    html_msg = msg
     if type=="info":
-      self.outputBox.append("""<div style="color: #656565">[INFO]</div>""" +msg)
+      html_msg = """<div style="color: #656565">[INFO]</div>""" +msg
     if type=="error":
-      self.outputBox.append("""<div style="color:red">[ERROR]</div>""" +msg)
+      html_msg = """<div style="color:red">[ERROR]</div>""" +msg
     if type=="warn":
-      self.outputBox.append("""<div style="color: #ffae42">[WARN]</div>""" +msg)
+      html_msg = """<div style="color: #ffae42">[WARN]</div>""" +msg
     if type=="block":
-      self.outputBox.append("""<div style="color: #656565">--------------------</div>""")
-    if type=="":
-      self.outputBox.append(msg)
+      html_msg = """<div style="color: #656565">--------------------</div>"""
+    self.outputBox.append(html_msg)
+    self.outputBox.moveCursor(QtGui.QTextCursor.End)
+    self.outputBox.ensureCursorVisible()
+    self.outputBox.verticalScrollBar().setValue(self.outputBox.verticalScrollBar().maximum())
+
+  def _is_valid_ipv4(self, ip_text: str) -> bool:
+    octets = str(ip_text).strip().split('.')
+    if len(octets) != 4:
+      return False
+    try:
+      return all(0 <= int(octet) <= 255 for octet in octets)
+    except ValueError:
+      return False
+
+  def _log_exception(self, context: str, exception: Exception):
+    self.Log('error', f' {context}: {exception}')
+    self.node.get_logger().error(f'{context}: {exception}')
+    self.node.get_logger().error(traceback.format_exc())
+
+  def _mask_ip_for_gui(self, ip_text: str) -> str:
+    ip_str = str(ip_text).strip()
+    if self._is_valid_ipv4(ip_str):
+      octets = ip_str.split('.')
+      return f'{octets[0]}.***.***.{octets[3]}'
+    return ip_str
+
+  def _masked_server_hint_from_client(self, client_ip_text: str) -> str:
+    client_ip = str(client_ip_text).strip()
+    if not self._is_valid_ipv4(client_ip):
+      return ''
+    client_octets = client_ip.split('.')
+    return f'{client_octets[0]}.***.***.'
+
+  def _resolve_client_ip_text(self, client_text: str) -> str:
+    value = str(client_text).strip()
+    if value == '':
+      return ''
+    if self.client_ip_raw is not None and value == self._mask_ip_for_gui(self.client_ip_raw):
+      return self.client_ip_raw
+    if self._is_valid_ipv4(value):
+      return value
+    return ''
+
+  def _resolve_server_ip_text(self, server_text: str) -> str:
+    value = str(server_text).strip()
+    if value == '':
+      return ''
+
+    if self.server_ip_raw is not None and value == self._mask_ip_for_gui(self.server_ip_raw):
+      return self.server_ip_raw
+
+    if self._is_valid_ipv4(value):
+      return value
+
+    if self.client_ip_raw is None or not self._is_valid_ipv4(self.client_ip_raw):
+      return ''
+
+    client_octets = self.client_ip_raw.split('.')
+    if re.fullmatch(r'\d{1,3}', value):
+      last_octet = int(value)
+      if 0 <= last_octet <= 255:
+        return f'{client_octets[0]}.{client_octets[1]}.{client_octets[2]}.{last_octet}'
+
+    masked_match = re.match(r'^\d{1,3}\.\*{3}\.\*{3}\.(\d{1,3})$', value)
+    if masked_match:
+      last_octet = int(masked_match.group(1))
+      if 0 <= last_octet <= 255:
+        return f'{client_octets[0]}.{client_octets[1]}.{client_octets[2]}.{last_octet}'
+
+    return ''
+
+  def _apply_client_ip_visual_mask(self):
+    resolved_client_ip = self._resolve_client_ip_text(self.textClientIP.text())
+    if resolved_client_ip != '':
+      self.client_ip_raw = resolved_client_ip
+      self.conn_params["clientIP"] = resolved_client_ip
+      self.textClientIP.setText(self._mask_ip_for_gui(resolved_client_ip))
+
+  def _apply_server_ip_visual_mask(self):
+    resolved_server_ip = self._resolve_server_ip_text(self.textServerIP.text())
+    if resolved_server_ip != '':
+      self.server_ip_raw = resolved_server_ip
+      self.conn_params["serverIP"] = resolved_server_ip
+      self.textServerIP.setText(self._mask_ip_for_gui(resolved_server_ip))
+
+  def _on_launch_started(self, pid: int, pgid: int):
+    self.launch_proc = pid
+    self.launch_pgid = pgid
+    self.is_running = True
+    self.Log('info', f' Started natnet launch process (pid={pid}, pgid={pgid})')
+    self.node.get_logger().info(f'Started natnet launch process (pid={pid}, pgid={pgid})')
+
+  def _on_launch_log_line(self, level: str, line: str):
+    if level == 'ERROR':
+      self.Log('error', f' [LAUNCH][STDERR] {line}')
+      self.node.get_logger().error(f'[LAUNCH][STDERR] {line}')
+    else:
+      self.Log('info', f' [LAUNCH][STDOUT] {line}')
+      self.node.get_logger().info(f'[LAUNCH][STDOUT] {line}')
+
+  def _on_launch_finished(self, return_code: int):
+    if return_code == 0:
+      self.Log('info', f' NatNet launch exited with code {return_code}')
+      self.node.get_logger().info(f'NatNet launch exited with code {return_code}')
+    else:
+      self.Log('error', f' NatNet launch exited with code {return_code}')
+      self.node.get_logger().error(f'NatNet launch exited with code {return_code}')
+    self._clear_launch_state()
+
+  def _clear_launch_state(self):
+    self.launch_proc = None
+    self.launch_pgid = None
+    self.is_running = False
+    self.start_node_thread = None
+
+  def _is_tracked_process_alive(self) -> bool:
+    if self.start_node_thread and self.start_node_thread.proc is not None:
+      return self.start_node_thread.proc.poll() is None
+    if self.launch_proc is None:
+      return False
+    try:
+      os.kill(self.launch_proc, 0)
+    except ProcessLookupError:
+      return False
+    except PermissionError:
+      return True
+    return True
+
+  def _wait_for_launch_exit(self, timeout_sec: float) -> bool:
+    end_time = time.time() + timeout_sec
+    while time.time() < end_time:
+      if not self._is_tracked_process_alive():
+        return True
+      time.sleep(0.1)
+    return not self._is_tracked_process_alive()
+
+  def _send_lifecycle_shutdown(self):
+    env = os.environ.copy()
+    env['ROS_DOMAIN_ID'] = str(self.id)
+    command = ['ros2', 'lifecycle', 'set', f'/{self.name}', 'shutdown']
+    self.Log('info', f" Sending lifecycle shutdown to /{self.name}")
+    self.node.get_logger().info(f"Sending lifecycle shutdown to /{self.name}")
+    result = subprocess.run(command, check=False, env=env, capture_output=True, text=True, timeout=4)
+    if result.stdout.strip():
+      self.Log('info', f" [LIFECYCLE] {result.stdout.strip()}")
+      self.node.get_logger().info(f"[LIFECYCLE] {result.stdout.strip()}")
+    if result.stderr.strip():
+      self.Log('error', f" [LIFECYCLE] {result.stderr.strip()}")
+      self.node.get_logger().error(f"[LIFECYCLE] {result.stderr.strip()}")
+
+  def _terminate_tracked_group(self, sig):
+    if self.launch_pgid is not None:
+      os.killpg(self.launch_pgid, sig)
+    elif self.launch_proc is not None:
+      os.kill(self.launch_proc, sig)
+
+  def shutdown_launch_process(self, reason: str):
+    if not self._is_tracked_process_alive() and not self.is_running:
+      self._clear_launch_state()
+      return
+
+    self.Log('block')
+    self.Log('info', f' Stopping natnet launch ({reason})')
+    self.node.get_logger().info(f'Stopping natnet launch ({reason})')
+    try:
+      self._send_lifecycle_shutdown()
+      if self._wait_for_launch_exit(timeout_sec=2.0):
+        self.Log('info', ' Launch exited after lifecycle shutdown')
+      else:
+        self.Log('warn', ' Launch still active, sending SIGTERM to tracked process group')
+        self.node.get_logger().warn('Launch still active, sending SIGTERM to tracked process group')
+        self._terminate_tracked_group(signal.SIGTERM)
+        if self._wait_for_launch_exit(timeout_sec=3.0):
+          self.Log('info', ' Launch exited after SIGTERM')
+        else:
+          self.Log('warn', ' Launch still active, sending SIGKILL to tracked process only')
+          self.node.get_logger().warn('Launch still active, sending SIGKILL to tracked process only')
+          if self.launch_proc is not None:
+            os.kill(self.launch_proc, signal.SIGKILL)
+          if self._wait_for_launch_exit(timeout_sec=2.0):
+            self.Log('info', ' Launch exited after SIGKILL')
+          else:
+            self.Log('error', ' Failed to stop tracked launch process')
+            self.node.get_logger().error('Failed to stop tracked launch process')
+    except Exception as e:
+      self._log_exception('Failed while stopping tracked natnet launch process', e)
+    finally:
+      self._clear_launch_state()
+      self.Log('block')
+
+  def closeEvent(self, event):
+    self.shutdown_launch_process('GUI closed')
+    super().closeEvent(event)
 
 #-----------------------------------------------------------------------------------------
 # START/STOP NATNET BUTTON
 
   def start(self):
-    kill_subp()
     self.Log('block')
-    self.check_all_params()
-    #print(f'{self.conn_params=},{self.natnet_params=},{self.pub_params=},{self.log_params=}')
-    command='''
-    source /opt/ros/{dist}/setup.bash;
-    source {pwd}/install/setup.bash;
-    export ROS_DOMAIN_ID={id};
-    ros2 launch natnet_ros2 natnet_ros2.launch.py node_name:={name} serverIP:={sip} \
-    clientIP:={cip} serverType:={st} multicastAddress:={mca} \
-    serverCommandPort:={scp} serverDataPort:={sdp} global_frame:={gf} \
-    remove_latency:={rl} pub_rigid_body:={prb} pub_rigid_body_marker:={prbm} \
-    pub_individual_marker:={pim} pub_pointcloud:={ppc} log_internals:={li} \
-    log_frames:={lf} log_latencies:={ll} conf_file:={cf} activate:={activate} \
-    immt:={immt}
-    '''.format(dist=self.ros_dist,id=self.id, pwd=self.pwd, name=self.name, sip=self.conn_params["serverIP"],
-              cip=self.conn_params["clientIP"],st=self.conn_params["serverType"],mca=self.conn_params["multicastAddress"],
-              scp=self.conn_params["serverCommandPort"],sdp=self.conn_params["serverDataPort"],gf=self.conn_params["globalFrame"],
-              rl=False,prb=self.pub_params["pub_rigid_body"],prbm=self.pub_params["pub_rigid_body_marker"],
-              pim=self.pub_params["pub_individual_marker"],ppc=self.pub_params["pub_pointcloud"],
-              li=self.log_params["log_internals"],lf=self.log_params["log_frames"],ll=self.log_params["log_latencies"],
-              cf='conf_autogen.yaml',activate=True,immt=self.pub_params["individual_marker_msg_type"])
-    self.start_node_thread = WorkerThread(command)
-    self.start_node_thread.start()
+    if self._is_tracked_process_alive() or self.is_running:
+      self.Log('warn', ' Start ignored. NatNet launch is already running for this GUI session.')
+      self.node.get_logger().warn('Start ignored. NatNet launch is already running for this GUI session.')
+      self.Log('block')
+      return
+    try:
+      self.check_all_params()
+      if not self.error_pass:
+        self.Log('error', ' Launch aborted because one or more required parameters are invalid.')
+        self.node.get_logger().error('Launch aborted because one or more required parameters are invalid.')
+        self.Log('block')
+        return
+
+      env = os.environ.copy()
+      env['ROS_DOMAIN_ID'] = str(self.id)
+
+      def bool_str(value):
+        return str(bool(value)).lower()
+
+      command = [
+        'ros2', 'launch', 'natnet_ros2', 'natnet_ros2.launch.py',
+        f'node_name:={self.name}',
+        f'serverIP:={self.conn_params["serverIP"]}',
+        f'clientIP:={self.conn_params["clientIP"]}',
+        f'serverType:={self.conn_params["serverType"]}',
+        f'multicastAddress:={self.conn_params["multicastAddress"]}',
+        f'serverCommandPort:={self.conn_params["serverCommandPort"]}',
+        f'serverDataPort:={self.conn_params["serverDataPort"]}',
+        f'global_frame:={self.conn_params["globalFrame"]}',
+        'remove_latency:=false',
+        f'pub_rigid_body:={bool_str(self.pub_params["pub_rigid_body"])}',
+        f'pub_rigid_body_marker:={bool_str(self.pub_params["pub_rigid_body_marker"])}',
+        f'pub_individual_marker:={bool_str(self.pub_params["pub_individual_marker"])}',
+        f'pub_pointcloud:={bool_str(self.pub_params["pub_pointcloud"])}',
+        f'log_internals:={bool_str(self.log_params["log_internals"])}',
+        f'log_frames:={bool_str(self.log_params["log_frames"])}',
+        f'log_latencies:={bool_str(self.log_params["log_latencies"])}',
+        'conf_file:=conf_autogen.yaml',
+        'activate:=true',
+        f'immt:={self.pub_params["individual_marker_msg_type"]}',
+      ]
+
+      self.start_node_thread = WorkerThread(command, env=env, cwd=self.pwd)
+      self.start_node_thread.started_signal.connect(self._on_launch_started)
+      self.start_node_thread.log_line_signal.connect(self._on_launch_log_line)
+      self.start_node_thread.finished_signal.connect(self._on_launch_finished)
+      self.is_running = True
+      self.start_node_thread.start()
+      self.Log('info', ' Starting natnet launch process...')
+      self.node.get_logger().info('Starting natnet launch process...')
+    except Exception as e:
+      self._log_exception('Failed to start natnet launch process', e)
+      self._clear_launch_state()
+    finally:
+      self.Log('block')
 
   def stop(self):
-    
-    command='''
-    source /opt/ros/{dist}/setup.bash;
-    export ROS_DOMAIN_ID={id};
-    ros2 lifecycle set /{name} shutdown
-    '''.format(dist=self.ros_dist,id=self.id,name=self.name)
-    #stop_node_thread = WorkerThread(command)
-    #stop_node_thread.start()
-    #pid = int(subprocess.check_output(["pidof","-s","natnet_ros2"]))
-    #subprocess.check_call(["kill","-9",str(pid)])
-    try:
-      self.start_node_thread.terminate()
-      subprocess.run(command,shell=True,check=False,executable='/bin/bash',bufsize=0, timeout=1)
-    except:
-      pass
-
-    self.Log('info',' Killed natnet node' )
-    self.Log('block')
+    self.shutdown_launch_process('Stop button pressed')
 
 #----------------------------------------------------------------------------------------
 # PUBLISHING RELATED STUFF
@@ -289,13 +529,21 @@ class PyQt5Widget(QtWidgets.QMainWindow):
 # NATNET CONNECTION RELATED
 
   def get_server_ip(self):
-    self.conn_params["serverIP"] = self.textServerIP.text()
-    self.Log('info','setting servet ip '+str(self.conn_params["serverIP"]))
+    resolved_server_ip = self._resolve_server_ip_text(self.textServerIP.text())
+    self.conn_params["serverIP"] = resolved_server_ip
+    self.server_ip_raw = resolved_server_ip if resolved_server_ip != '' else None
+    if resolved_server_ip != '':
+      self.textServerIP.setText(self._mask_ip_for_gui(resolved_server_ip))
+      self.Log('info','setting servet ip '+self._mask_ip_for_gui(resolved_server_ip))
     #self.Log('info','setting server ip '+str(self.conn_params["serverIP"]).split('.')[0]+'***'+'***'+str(self.conn_params["serverIP"]).split('.')[-1])
 
   def get_client_ip(self):
-    self.conn_params["clientIP"] = self.textClientIP.text()
-    self.Log('info','setting client ip '+str(self.conn_params["clientIP"]))
+    resolved_client_ip = self._resolve_client_ip_text(self.textClientIP.text())
+    self.conn_params["clientIP"] = resolved_client_ip
+    self.client_ip_raw = resolved_client_ip if resolved_client_ip != '' else self.client_ip_raw
+    if resolved_client_ip != '':
+      self.textClientIP.setText(self._mask_ip_for_gui(resolved_client_ip))
+      self.Log('info','setting client ip '+self._mask_ip_for_gui(resolved_client_ip))
     #self.Log('info','setting client ip '+str(self.conn_params["clientIP"]).split('.')[0]+'***'+'***'+str(self.conn_params["clientIP"]).split('.')[-1])
 
   def get_server_type(self):
@@ -322,12 +570,24 @@ class PyQt5Widget(QtWidgets.QMainWindow):
     self.Log('info','setting multicast address '+str(self.conn_params["multicastAddress"]))
 
   def get_command_port(self):
-    self.conn_params["serverCommandPort"] = int(self.textCommandPort.text())
-    self.Log('info','setting command port '+str(self.conn_params["serverCommandPort"]))
+    port_text = self.textCommandPort.text()
+    try:
+      self.conn_params["serverCommandPort"] = int(port_text)
+      self.Log('info','setting command port '+str(self.conn_params["serverCommandPort"]))
+    except Exception as e:
+      self.conn_params["serverCommandPort"] = None
+      self.error_pass = False
+      self._log_exception(f'Invalid command port value: {port_text}', e)
 
   def get_data_port(self):
-    self.conn_params["serverDataPort"] = int(self.textDataPort.text())
-    self.Log('info','setting data port '+str(self.conn_params["serverDataPort"]))
+    port_text = self.textDataPort.text()
+    try:
+      self.conn_params["serverDataPort"] = int(port_text)
+      self.Log('info','setting data port '+str(self.conn_params["serverDataPort"]))
+    except Exception as e:
+      self.conn_params["serverDataPort"] = None
+      self.error_pass = False
+      self._log_exception(f'Invalid data port value: {port_text}', e)
 
   def get_world_frame(self):
     self.conn_params["globalFrame"] = self.textFrameName.text()
@@ -338,10 +598,13 @@ class PyQt5Widget(QtWidgets.QMainWindow):
       self.Log('info','setting world frame name '+str(self.conn_params["globalFrame"]))
 
   def spin_clientIP(self):
-    self.textClientIP.setText(str(self.IP_LIST[self.client_ip_spin.value()-1]))
-    self.conn_params["clientIP"] = str(self.IP_LIST[self.client_ip_spin.value()-1])
-    self.textServerIP.setText('.'.join(str(self.IP_LIST[self.client_ip_spin.value()-1]).split('.')[:-1],)+'.')
-    self.Log('info','setting client ip '+str(self.conn_params["clientIP"]))
+    selected_client_ip = str(self.IP_LIST[self.client_ip_spin.value()-1])
+    self.client_ip_raw = selected_client_ip
+    self.conn_params["clientIP"] = selected_client_ip
+    self.server_ip_raw = None
+    self.textClientIP.setText(self._mask_ip_for_gui(selected_client_ip))
+    self.textServerIP.setText(self._masked_server_hint_from_client(selected_client_ip))
+    self.Log('info','setting client ip '+self._mask_ip_for_gui(self.conn_params["clientIP"]))
 
   def spin_msg_type(self):
     self.textMsgType.setText(self.msg_types[self.msg_type_spin.value()-1])
@@ -358,6 +621,7 @@ class PyQt5Widget(QtWidgets.QMainWindow):
 # PARAM CHECK RELATED
 
   def chek_conn_params(self):
+    self.error_pass = True
     self.get_server_ip()
     if self.conn_params["serverIP"]==None or self.conn_params["serverIP"]=='':
       self.Log('error','No server ip provided. Can not connect.')
@@ -428,8 +692,9 @@ class PyQt5Widget(QtWidgets.QMainWindow):
       self.natnet_params = object_names
       try:
         os.remove(os.path.join(self.config_file))
-      except OSError:
-        pass
+      except OSError as e:
+        self.Log('warn', f' Could not remove existing config file: {e}')
+        self.node.get_logger().warn(f'Could not remove existing config file: {e}')
 
       with open(self.config_file,'w') as f:
         yaml.dump({self.name: {'ros__parameters':self.natnet_params}},f,indent=2,default_flow_style=False)
@@ -445,6 +710,9 @@ class PyQt5Widget(QtWidgets.QMainWindow):
         self.set_lcds(res.num_of_markers,res.x_position,res.y_position,res.z_position)
       except RuntimeError as e:
         self.Log('error','Service call failed: '+str(e))
+        self.node.get_logger().error('Service call failed: '+str(e))
+      except Exception as e:
+        self._log_exception('Unexpected error during marker pose service call', e)
 
 #----------------------------------------------------------------------------------------
 # LOGGING RELATED
@@ -475,6 +743,7 @@ def main(args=None):
     rclpy.init(args=args)
 
     node = HelperNode()
+    window = None
 
     app = QtWidgets.QApplication(sys.argv)
     window = PyQt5Widget(node)
@@ -483,7 +752,8 @@ def main(args=None):
     try:
       sys.exit(app.exec_())
     finally:
-      kill_subp()
+      if window is not None:
+        window.shutdown_launch_process('Application shutdown')
       # Clean up ROS when the application is closed
       node.destroy_node()
       rclpy.shutdown()
