@@ -16,14 +16,32 @@ class HelperNode(Node):
                         start_parameter_services=True)
 
     self.marker_pose_cli = self.create_client(MarkerPoses,'get_marker_position')
-    while not self.marker_pose_cli.wait_for_service(timeout_sec=1.0):
-      self.get_logger().info('service not available, waiting again...')
     self.req = MarkerPoses.Request()
+    if not self.marker_service_ready(timeout_sec=0.0):
+      self.get_logger().warn('marker_poses_server is unavailable at startup; GUI will retry in background.')
 
-  def request_markerposes(self):
+  def marker_service_ready(self, timeout_sec: float = 0.0) -> bool:
+    timeout = max(0.0, float(timeout_sec))
+    try:
+      return self.marker_pose_cli.wait_for_service(timeout_sec=timeout)
+    except Exception as e:
+      self.get_logger().error(f'Error while checking marker service readiness: {e}')
+      return False
+
+  def request_markerposes(self, timeout_sec: float = 2.0):
+    if not self.marker_service_ready(timeout_sec=timeout_sec):
+      raise RuntimeError('Marker pose service is unavailable.')
+
     self.future = self.marker_pose_cli.call_async(self.req)
-    rclpy.spin_until_future_complete(self, self.future)
-    return self.future.result()
+    rclpy.spin_until_future_complete(self, self.future, timeout_sec=timeout_sec)
+    if not self.future.done():
+      raise RuntimeError('Marker pose service call timed out.')
+
+    result = self.future.result()
+    if result is None:
+      e = self.future.exception()
+      raise RuntimeError(f'Exception while calling marker service: {e}')
+    return result
 
   def call_set_parameters(self, node_name:str, param_dict:dict) -> bool:
     #parameters=param_dict

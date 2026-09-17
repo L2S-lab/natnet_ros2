@@ -30,17 +30,19 @@ from natnet_ros2_py.node_module import HelperNode
 import subprocess
 import os
 import re
+import shutil
 import signal
 import threading
 import time
 import traceback
 import yaml
+from pathlib import Path
 
 from PyQt5 import QtWidgets, uic
 import sys
 
 from PyQt5 import QtGui, QtWidgets
-from PyQt5.QtCore import QObject, QThread, pyqtSignal
+from PyQt5.QtCore import QObject, QThread, QTimer, pyqtSignal
 
 class WorkerThread(QThread):
   started_signal = pyqtSignal(int, int)
@@ -102,8 +104,12 @@ class PyQt5Widget(QtWidgets.QMainWindow):
 
     self.ros_dist = os.environ['ROS_DISTRO']
     self.pwd = os.getcwd()
+    self.workspace_root = None
+    self.workspace_setup_script = None
+    self.ros2_executable = None
     self.msg_types = ["PoseStamped","PointStamped"]
     self.im_msg_type = self.msg_types[0]
+    self.config_file = None
     if os.path.exists(os.path.join(PKG_PATH, 'config','conf_autogen.yaml')):
       self.config_file = os.path.join(PKG_PATH, 'config','conf_autogen.yaml')
     self.name = 'natnet_ros2'
@@ -139,6 +145,11 @@ class PyQt5Widget(QtWidgets.QMainWindow):
     self.start_node_thread = None
     self.client_ip_raw = None
     self.server_ip_raw = None
+    self.marker_service_available = False
+    self._last_marker_service_state = None
+    self.marker_service_check_timer = QTimer(self)
+    self.marker_service_check_timer.setInterval(2000)
+    self.marker_service_check_timer.timeout.connect(self._refresh_marker_service_status)
     
     self.outputBox.append("""<div style="color: #ff8c00">[NOTE]</div>""")
     self.outputBox.append('- This prompt does not show all the errors. For full error, check the terminal where this node has been excecuted')
@@ -196,6 +207,11 @@ class PyQt5Widget(QtWidgets.QMainWindow):
     self.push_refresh.clicked.connect(self.call_MarkerPoses_srv)
     self.push_ok.clicked.connect(self.yaml_dump)
 
+    self.push_refresh.setEnabled(False)
+    self.push_refresh.setToolTip('Marker service unavailable. Start marker_poses_server to enable refresh.')
+    self._refresh_marker_service_status()
+    self.marker_service_check_timer.start()
+
   def Log(self,type:str="",msg=''):
     html_msg = msg
     if type=="info":
@@ -220,6 +236,13 @@ class PyQt5Widget(QtWidgets.QMainWindow):
     except ValueError:
       return False
 
+  def _is_valid_node_name(self, node_name: str) -> bool:
+    name = str(node_name).strip()
+    return bool(re.fullmatch(r'[A-Za-z_][A-Za-z0-9_]*', name))
+
+  def _is_valid_port(self, port: int) -> bool:
+    return isinstance(port, int) and 1 <= port <= 65535
+
   def _log_exception(self, context: str, exception: Exception):
     self.Log('error', f' {context}: {exception}')
     self.node.get_logger().error(f'{context}: {exception}')
@@ -238,6 +261,106 @@ class PyQt5Widget(QtWidgets.QMainWindow):
       return ''
     client_octets = client_ip.split('.')
     return f'{client_octets[0]}.***.***.'
+
+  def _resolve_workspace_setup_script(self):
+    candidate_paths = []
+    env_workspace = os.environ.get('NATNET_WS')
+    if env_workspace:
+      candidate_paths.append(Path(env_workspace).expanduser())
+
+    cwd_path = Path(os.getcwd()).resolve()
+    candidate_paths.extend([cwd_path, *cwd_path.parents])
+
+    pkg_path = Path(PKG_PATH).resolve()
+    candidate_paths.extend([pkg_path, *pkg_path.parents])
+
+    ament_prefix_path = os.environ.get('AMENT_PREFIX_PATH', '')
+    for prefix in ament_prefix_path.split(os.pathsep):
+      if not prefix:
+        continue
+      prefix_path = Path(prefix).expanduser().resolve()
+      candidate_paths.extend([prefix_path, *prefix_path.parents])
+
+    checked = set()
+    for path in candidate_paths:
+      resolved_path = path.resolve()
+      if resolved_path in checked:
+        continue
+      checked.add(resolved_path)
+
+      workspace_root = resolved_path
+      if resolved_path.name in ('install', 'src'):
+        workspace_root = resolved_path.parent
+
+      install_dir = workspace_root / 'install'
+      if not install_dir.is_dir():
+        continue
+
+      for setup_name in ('setup.bash', 'local_setup.bash'):
+        setup_path = install_dir / setup_name
+        if setup_path.is_file():
+          return str(workspace_root), str(setup_path)
+
+    return None, None
+
+  def _run_preflight_checks(self) -> bool:
+    self.ros2_executable = shutil.which('ros2')
+    self.workspace_root, self.workspace_setup_script = self._resolve_workspace_setup_script()
+    package_share_exists = os.path.isdir(PKG_PATH)
+
+    ok = True
+    if self.ros2_executable is None:
+      self.Log('error', ' Preflight failed: ros2 executable was not found in PATH.')
+      self.node.get_logger().error('Preflight failed: ros2 executable was not found in PATH.')
+      ok = False
+    if self.workspace_root is None or self.workspace_setup_script is None:
+      self.Log('error', ' Preflight failed: could not locate workspace install setup script (install/setup.bash).')
+      self.node.get_logger().error('Preflight failed: could not locate workspace install setup script (install/setup.bash). Set NATNET_WS or launch from a valid workspace.')
+      ok = False
+    if not package_share_exists:
+      self.Log('error', f' Preflight failed: package share path does not exist: {PKG_PATH}')
+      self.node.get_logger().error(f'Preflight failed: package share path does not exist: {PKG_PATH}')
+      ok = False
+
+    if ok:
+      self.Log('info', f' Preflight OK: workspace={self.workspace_root}')
+      self.node.get_logger().info(f'Preflight OK: workspace={self.workspace_root}, setup={self.workspace_setup_script}, ros2={self.ros2_executable}')
+    return ok
+
+  def _refresh_marker_service_status(self):
+    is_ready = self.node.marker_service_ready(timeout_sec=0.0)
+    self.marker_service_available = is_ready
+    self.push_refresh.setEnabled(is_ready)
+
+    if is_ready:
+      self.push_refresh.setToolTip('Refresh marker poses from marker_poses_server.')
+    else:
+      self.push_refresh.setToolTip('Marker service unavailable. Start marker_poses_server to enable refresh.')
+
+    if self._last_marker_service_state is None or self._last_marker_service_state != is_ready:
+      if is_ready:
+        self.Log('info', ' Marker service is available. Refresh is enabled.')
+        self.node.get_logger().info('Marker service is available. Refresh is enabled.')
+      else:
+        self.Log('warn', ' Marker service is unavailable. Refresh is disabled and will retry automatically.')
+        self.node.get_logger().warn('Marker service is unavailable. Refresh is disabled and will retry automatically.')
+      self._last_marker_service_state = is_ready
+
+  def _clear_marker_display(self):
+    for i in range(1, 41):
+      marker_box = getattr(self, f'markerBox_{i}', None)
+      x_lcd = getattr(self, f'X_{i}', None)
+      y_lcd = getattr(self, f'Y_{i}', None)
+      z_lcd = getattr(self, f'Z_{i}', None)
+
+      if marker_box is not None:
+        marker_box.setEnabled(False)
+      if x_lcd is not None:
+        x_lcd.display(0.0)
+      if y_lcd is not None:
+        y_lcd.display(0.0)
+      if z_lcd is not None:
+        z_lcd.display(0.0)
 
   def _resolve_client_ip_text(self, client_text: str) -> str:
     value = str(client_text).strip()
@@ -397,6 +520,8 @@ class PyQt5Widget(QtWidgets.QMainWindow):
       self.Log('block')
 
   def closeEvent(self, event):
+    if self.marker_service_check_timer.isActive():
+      self.marker_service_check_timer.stop()
     self.shutdown_launch_process('GUI closed')
     super().closeEvent(event)
 
@@ -415,6 +540,11 @@ class PyQt5Widget(QtWidgets.QMainWindow):
       if not self.error_pass:
         self.Log('error', ' Launch aborted because one or more required parameters are invalid.')
         self.node.get_logger().error('Launch aborted because one or more required parameters are invalid.')
+        self.Log('block')
+        return
+      if not self._run_preflight_checks():
+        self.Log('error', ' Launch aborted due to failed preflight checks.')
+        self.node.get_logger().error('Launch aborted due to failed preflight checks.')
         self.Log('block')
         return
 
@@ -447,7 +577,8 @@ class PyQt5Widget(QtWidgets.QMainWindow):
         f'immt:={self.pub_params["individual_marker_msg_type"]}',
       ]
 
-      self.start_node_thread = WorkerThread(command, env=env, cwd=self.pwd)
+      launch_cwd = self.workspace_root if self.workspace_root is not None else self.pwd
+      self.start_node_thread = WorkerThread(command, env=env, cwd=launch_cwd)
       self.start_node_thread.started_signal.connect(self._on_launch_started)
       self.start_node_thread.log_line_signal.connect(self._on_launch_log_line)
       self.start_node_thread.finished_signal.connect(self._on_launch_finished)
@@ -572,22 +703,44 @@ class PyQt5Widget(QtWidgets.QMainWindow):
   def get_command_port(self):
     port_text = self.textCommandPort.text()
     try:
-      self.conn_params["serverCommandPort"] = int(port_text)
-      self.Log('info','setting command port '+str(self.conn_params["serverCommandPort"]))
-    except Exception as e:
+      port_value = int(port_text)
+    except ValueError:
       self.conn_params["serverCommandPort"] = None
       self.error_pass = False
-      self._log_exception(f'Invalid command port value: {port_text}', e)
+      self.Log('error', f'Invalid command port value: {port_text}. Use an integer between 1 and 65535.')
+      self.node.get_logger().error(f'Invalid command port value: {port_text}. Use an integer between 1 and 65535.')
+      return
+
+    if not self._is_valid_port(port_value):
+      self.conn_params["serverCommandPort"] = None
+      self.error_pass = False
+      self.Log('error', f'Command port out of range: {port_value}. Allowed range is 1-65535.')
+      self.node.get_logger().error(f'Command port out of range: {port_value}. Allowed range is 1-65535.')
+      return
+
+    self.conn_params["serverCommandPort"] = port_value
+    self.Log('info','setting command port '+str(self.conn_params["serverCommandPort"]))
 
   def get_data_port(self):
     port_text = self.textDataPort.text()
     try:
-      self.conn_params["serverDataPort"] = int(port_text)
-      self.Log('info','setting data port '+str(self.conn_params["serverDataPort"]))
-    except Exception as e:
+      port_value = int(port_text)
+    except ValueError:
       self.conn_params["serverDataPort"] = None
       self.error_pass = False
-      self._log_exception(f'Invalid data port value: {port_text}', e)
+      self.Log('error', f'Invalid data port value: {port_text}. Use an integer between 1 and 65535.')
+      self.node.get_logger().error(f'Invalid data port value: {port_text}. Use an integer between 1 and 65535.')
+      return
+
+    if not self._is_valid_port(port_value):
+      self.conn_params["serverDataPort"] = None
+      self.error_pass = False
+      self.Log('error', f'Data port out of range: {port_value}. Allowed range is 1-65535.')
+      self.node.get_logger().error(f'Data port out of range: {port_value}. Allowed range is 1-65535.')
+      return
+
+    self.conn_params["serverDataPort"] = port_value
+    self.Log('info','setting data port '+str(self.conn_params["serverDataPort"]))
 
   def get_world_frame(self):
     self.conn_params["globalFrame"] = self.textFrameName.text()
@@ -611,10 +764,14 @@ class PyQt5Widget(QtWidgets.QMainWindow):
     self.im_msg_type = self.msg_types[self.msg_type_spin.value()-1]
 
   def get_node_name(self):
-    self.name = self.textNodeName.text()
+    self.name = self.textNodeName.text().strip()
     if self.name=='':
       self.name='natnet_ros2'
       self.Log('warn','setting natnet_ros2 name to world as no input provided')
+    elif not self._is_valid_node_name(self.name):
+      self.Log('error', f'Invalid node name: {self.name}. Use pattern [A-Za-z_][A-Za-z0-9_]*')
+      self.node.get_logger().error(f'Invalid node name: {self.name}. Use pattern [A-Za-z_][A-Za-z0-9_]*')
+      self.error_pass = False
     else:
       self.Log('info','setting name '+self.name)
 #----------------------------------------------------------------------------------------
@@ -645,7 +802,20 @@ class PyQt5Widget(QtWidgets.QMainWindow):
   def set_conn_params(self,node_name:str):
     self.chek_conn_params()
     if self.error_pass:
-      self.node.call_set_parameters(node_name,self.conn_params)
+      try:
+        if node_name == 'marker_poses_server' and not self.node.marker_service_ready(timeout_sec=0.1):
+          self.error_pass = False
+          self.Log('warn', ' Marker service unavailable; cannot update connection parameters right now.')
+          self.node.get_logger().warn('Marker service unavailable; cannot update connection parameters right now.')
+          return
+        self.node.call_set_parameters(node_name,self.conn_params)
+      except RuntimeError as e:
+        self.error_pass = False
+        self.Log('error', f' Failed to set parameters on {node_name}: {e}')
+        self.node.get_logger().error(f'Failed to set parameters on {node_name}: {e}')
+      except Exception as e:
+        self.error_pass = False
+        self._log_exception(f'Unexpected error while setting parameters on {node_name}', e)
 
   def check_all_params(self):
     self.chek_conn_params()
@@ -663,35 +833,79 @@ class PyQt5Widget(QtWidgets.QMainWindow):
 # MARKER POSE SERVER RELATED
 
   def set_lcds(self,num_of_markers,x_position,y_position,z_position):
-    if (len(x_position) or len(y_position) or len(z_position))!=num_of_markers:
-      self.Log('error',' Length of positions and number of detected markers are not matching, Press refresh to retry.')
-    else:
-      for i in range(min(40,num_of_markers)):
-        eval('self.markerBox_'+str(i+1)+'.setEnabled(True)')
-        eval('self.X_'+str(i+1)+'.display(x_position[i])')
-        eval('self.Y_'+str(i+1)+'.display(y_position[i])')
-        eval('self.Z_'+str(i+1)+'.display(z_position[i])')
-      self.num_of_markers = num_of_markers
-      self.x_position = x_position
-      self.y_position = y_position
-      self.z_position = z_position
+    x_len = len(x_position)
+    y_len = len(y_position)
+    z_len = len(z_position)
+    if not (x_len == y_len == z_len == num_of_markers):
+      self.Log('error', f' Length mismatch for marker payload. expected={num_of_markers}, x={x_len}, y={y_len}, z={z_len}.')
+      self.node.get_logger().error(f'Length mismatch for marker payload. expected={num_of_markers}, x={x_len}, y={y_len}, z={z_len}.')
+      self._clear_marker_display()
+      self.num_of_markers = 0
+      self.x_position = None
+      self.y_position = None
+      self.z_position = None
+      return
+
+    visible_count = min(40, num_of_markers)
+    for i in range(1, 41):
+      marker_box = getattr(self, f'markerBox_{i}', None)
+      x_lcd = getattr(self, f'X_{i}', None)
+      y_lcd = getattr(self, f'Y_{i}', None)
+      z_lcd = getattr(self, f'Z_{i}', None)
+
+      if marker_box is not None:
+        marker_box.setEnabled(i <= visible_count)
+
+      if i <= visible_count:
+        if x_lcd is not None:
+          x_lcd.display(x_position[i-1])
+        if y_lcd is not None:
+          y_lcd.display(y_position[i-1])
+        if z_lcd is not None:
+          z_lcd.display(z_position[i-1])
+      else:
+        if x_lcd is not None:
+          x_lcd.display(0.0)
+        if y_lcd is not None:
+          y_lcd.display(0.0)
+        if z_lcd is not None:
+          z_lcd.display(0.0)
+
+    self.num_of_markers = num_of_markers
+    self.x_position = x_position
+    self.y_position = y_position
+    self.z_position = z_position
 
   def yaml_dump(self):
     self.im_msg_type = self.msg_types[self.msg_type_spin.value()-1]
-    empty=0
     object_names={'object_names':[]}
+    if self.config_file is None:
+      self.Log('error', ' Configuration file path is not initialized. Cannot save marker configuration.')
+      self.node.get_logger().error('Configuration file path is not initialized. Cannot save marker configuration.')
+      return
+
     if self.num_of_markers!=0:
       for i in range(min(40,self.num_of_markers)):
-        if eval('self.name_'+str(i+1)+'.text()') == '': empty+=1
-        else:
-          object_names['object_names'].append(eval('self.name_'+str(i+1)+'.text()'))
-          object_names[object_names['object_names'][i-empty]]={'marker_config':0,
-                                                    'pose':
-                                                    {'position':[self.x_position[i],self.y_position[i],self.z_position[i]],
-                                                    'orientation':[0,0,0]}}
+        name_widget = getattr(self, f'name_{i+1}', None)
+        if name_widget is None:
+          continue
+        marker_name = name_widget.text().strip()
+        if marker_name == '':
+          continue
+
+        object_names['object_names'].append(marker_name)
+        object_names[marker_name] = {
+          'marker_config': 0,
+          'pose': {
+            'position': [self.x_position[i], self.y_position[i], self.z_position[i]],
+            'orientation': [0, 0, 0],
+          },
+        }
+
       self.natnet_params = object_names
       try:
-        os.remove(os.path.join(self.config_file))
+        if os.path.exists(self.config_file):
+          os.remove(self.config_file)
       except OSError as e:
         self.Log('warn', f' Could not remove existing config file: {e}')
         self.node.get_logger().warn(f'Could not remove existing config file: {e}')
@@ -703,10 +917,18 @@ class PyQt5Widget(QtWidgets.QMainWindow):
       self.Log('error','Number of markers are not recieved. Something went wrong.')
 
   def call_MarkerPoses_srv(self):
+    if not self.node.marker_service_ready(timeout_sec=0.1):
+      self.marker_service_available = False
+      self.push_refresh.setEnabled(False)
+      self.push_refresh.setToolTip('Marker service unavailable. Start marker_poses_server to enable refresh.')
+      self.Log('warn', ' Marker service is unavailable. Refresh request skipped.')
+      self.node.get_logger().warn('Marker service is unavailable. Refresh request skipped.')
+      return
+
     self.set_conn_params('marker_poses_server')
     if self.error_pass:
       try:
-        res = self.node.request_markerposes()
+        res = self.node.request_markerposes(timeout_sec=2.0)
         self.set_lcds(res.num_of_markers,res.x_position,res.y_position,res.z_position)
       except RuntimeError as e:
         self.Log('error','Service call failed: '+str(e))
