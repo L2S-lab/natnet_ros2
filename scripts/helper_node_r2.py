@@ -30,6 +30,8 @@ from natnet_ros2_py.node_module import HelperNode
 import subprocess
 import os
 import re
+import html
+from collections import deque
 import shutil
 import signal
 import threading
@@ -42,7 +44,7 @@ from PyQt5 import QtWidgets, uic
 import sys
 
 from PyQt5 import QtGui, QtWidgets
-from PyQt5.QtCore import QObject, QThread, QTimer, pyqtSignal
+from PyQt5.QtCore import QObject, QThread, QTimer, pyqtSignal, Qt
 
 class WorkerThread(QThread):
   started_signal = pyqtSignal(int, int)
@@ -91,18 +93,33 @@ class WorkerThread(QThread):
       self.log_line_signal.emit('ERROR', traceback.format_exc().strip())
       self.finished_signal.emit(-1)
 
+class MarkerRefreshThread(QThread):
+  result_signal = pyqtSignal(object)
+  error_signal = pyqtSignal(str)
+
+  def __init__(self, node):
+    super().__init__()
+    self.node = node
+
+  def run(self):
+    try:
+      self.result_signal.emit(self.node.request_markerposes(timeout_sec=5.0, max_attempts=3))
+    except RuntimeError as e:
+      self.error_signal.emit(str(e))
+    except Exception:
+      self.error_signal.emit(traceback.format_exc().strip())
+
 class PyQt5Widget(QtWidgets.QMainWindow):
   def __init__(self,node:Node):
     super(PyQt5Widget, self).__init__()
     self.node = node
     ui_file = os.path.join(PKG_PATH, 'ui', 'helper.ui')
-    print('')
-    print(ui_file)
-    print('')
     uic.loadUi(ui_file, self)
     self.setWindowIcon(QtGui.QIcon(os.path.join(PKG_PATH,'ui','logo.png')))
+    self._theme_dark = False
+    self._log_entries = deque(maxlen=1000)
+    self._build_interface()
 
-    self.ros_dist = os.environ['ROS_DISTRO']
     self.pwd = os.getcwd()
     self.workspace_root = None
     self.workspace_setup_script = None
@@ -147,18 +164,19 @@ class PyQt5Widget(QtWidgets.QMainWindow):
     self.server_ip_raw = None
     self.marker_service_available = False
     self._last_marker_service_state = None
+    self.marker_refresh_thread = None
     self.marker_service_check_timer = QTimer(self)
     self.marker_service_check_timer.setInterval(2000)
     self.marker_service_check_timer.timeout.connect(self._refresh_marker_service_status)
     
-    self.outputBox.append("""<div style="color: #ff8c00">[NOTE]</div>""")
-    self.outputBox.append('- This prompt does not show all the errors. For full error, check the terminal where this node has been excecuted')
-    self.outputBox.append('- It is required to launch the node from your main workspace folder where this package has been built')
-    self.outputBox.append('- Stop only affects the launch process started by this GUI session.')
-    self.Log('info',' If your WIFI or LAN IP is not detected in the list of the network, You can use the remote IP option and add the ip address manually.')
-    self.Log('info',' rosmaster will be selected initially based on the environment variables. You can change it anytime. Provided rosmaster will be used to run the main natnet node.')
-    #self.Log('info',' ')
-    IP_data = subprocess.check_output(['lshw','-c','network']).decode('utf-8')
+    self.Log('info', 'Set connection details, choose publishers, then press Start. Stop affects only this window’s launch.')
+    self.Log('info', 'Enter client and server IPs manually if no network interface is detected.')
+    try:
+      IP_data = subprocess.check_output(
+        ['lshw', '-c', 'network'], stderr=subprocess.DEVNULL, timeout=3).decode('utf-8')
+    except (OSError, subprocess.CalledProcessError, subprocess.TimeoutExpired) as e:
+      IP_data = ''
+      self.Log('warn', f' Network detection unavailable ({e}). Enter client and server IPs manually.')
     IP_data=re.sub(r"[^a-zA-Z0-9. ]", "", IP_data)
     IP_data=IP_data.split('network')
     IP_data.pop(0)
@@ -209,23 +227,519 @@ class PyQt5Widget(QtWidgets.QMainWindow):
 
     self.push_refresh.setEnabled(False)
     self.push_refresh.setToolTip('Marker service unavailable. Start marker_poses_server to enable refresh.')
+    self._set_launch_status('Stopped', 'muted')
     self._refresh_marker_service_status()
     self.marker_service_check_timer.start()
 
+  def _build_interface(self):
+    self.setWindowTitle('NatNet Control Center')
+    self.setCentralWidget(self.verticalLayoutWidget)
+    self.setMinimumSize(760, 560)
+    self.resize(1020, 740)
+    self.tabWidget.setTabText(0, 'Connection & Control')
+    self.tabWidget.setTabText(1, 'Marker Naming')
+    self.tabWidget.tabBar().setExpanding(False)
+    self.tabWidget.tabBar().setUsesScrollButtons(True)
+    self.tabWidget.tabBar().setElideMode(Qt.ElideNone)
+    self._layout_settings_groups()
+
+    global_bar = QtWidgets.QHBoxLayout()
+    global_bar.setContentsMargins(18, 6, 18, 0)
+    brand = QtWidgets.QLabel('NatNet')
+    brand.setObjectName('brandLabel')
+    global_bar.addWidget(brand)
+    global_bar.addStretch()
+    self.theme_toggle = QtWidgets.QPushButton('Dark mode')
+    self.theme_toggle.setObjectName('themeToggle')
+    self.theme_toggle.setCheckable(True)
+    self.theme_toggle.setToolTip('Switch between light and dark appearance.')
+    self.theme_toggle.toggled.connect(self._apply_theme)
+    global_bar.addWidget(self.theme_toggle)
+    self.verticalLayoutWidget.layout().insertLayout(0, global_bar)
+
+    control_layout = QtWidgets.QVBoxLayout(self.control_tab)
+    control_layout.setContentsMargins(18, 16, 18, 16)
+    control_layout.setSpacing(14)
+    header = QtWidgets.QHBoxLayout()
+    heading = QtWidgets.QVBoxLayout()
+    title = QtWidgets.QLabel('NatNet control')
+    title.setObjectName('pageTitle')
+    subtitle = QtWidgets.QLabel('Connect to motion capture, choose output, and monitor launch activity.')
+    subtitle.setObjectName('pageSubtitle')
+    subtitle.setWordWrap(True)
+    heading.addWidget(title)
+    heading.addWidget(subtitle)
+    header.addLayout(heading)
+    header.addStretch()
+    self.launch_status_label = QtWidgets.QLabel()
+    self.launch_status_label.setAlignment(Qt.AlignCenter)
+    self.launch_status_label.setMinimumWidth(110)
+    header.addWidget(self.launch_status_label)
+    control_layout.addLayout(header)
+
+    body = QtWidgets.QHBoxLayout()
+    body.setSpacing(16)
+    settings_column = QtWidgets.QWidget()
+    settings_column.setMinimumWidth(330)
+    settings_column_layout = QtWidgets.QVBoxLayout(settings_column)
+    settings_column_layout.setContentsMargins(0, 0, 0, 0)
+    settings_column_layout.setSpacing(10)
+    settings_scroll = QtWidgets.QScrollArea()
+    settings_scroll.setWidgetResizable(True)
+    settings_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+    settings_panel = QtWidgets.QWidget()
+    settings_panel.setObjectName('settings_panel')
+    settings_layout = QtWidgets.QVBoxLayout(settings_panel)
+    settings_layout.setContentsMargins(2, 2, 10, 4)
+    settings_layout.setSpacing(12)
+    for group in (self.parameters, self.connection_settings, self.publisher_setting):
+      settings_layout.addWidget(group)
+    settings_layout.addStretch()
+    settings_scroll.setWidget(settings_panel)
+    settings_scroll_row = QtWidgets.QHBoxLayout()
+    settings_scroll_row.setSpacing(7)
+    settings_scroll_row.addWidget(settings_scroll, 1)
+    settings_scroll_row.addWidget(self._scroll_controls(settings_scroll))
+    settings_column_layout.addLayout(settings_scroll_row, 1)
+    actions = QtWidgets.QHBoxLayout()
+    actions.addStretch()
+    actions.addWidget(self.stop_node)
+    actions.addWidget(self.start_node)
+    settings_column_layout.addLayout(actions)
+    body.addWidget(settings_column, 5)
+
+    activity = QtWidgets.QVBoxLayout()
+    activity.setSpacing(12)
+    for group in (self.ros_network, self.logging_settings):
+      activity.addWidget(group)
+    log_heading = QtWidgets.QHBoxLayout()
+    log_title = QtWidgets.QLabel('Activity')
+    log_title.setObjectName('sectionTitle')
+    clear_logs = QtWidgets.QPushButton('Clear')
+    clear_logs.setToolTip('Clear visible activity messages.')
+    clear_logs.clicked.connect(self._clear_logs)
+    log_heading.addWidget(log_title)
+    log_heading.addStretch()
+    log_heading.addWidget(clear_logs)
+    activity.addLayout(log_heading)
+    self.outputBox.setParent(self.control_tab)
+    self.outputBox.setMinimumWidth(300)
+    self.outputBox.document().setMaximumBlockCount(1000)
+    activity.addWidget(self.outputBox, 1)
+    self.outputBox.show()
+    self.outputBox_scroll.hide()
+    body.addLayout(activity, 6)
+    control_layout.addLayout(body, 1)
+
+    marker_layout = QtWidgets.QVBoxLayout(self.marker_name_tab)
+    marker_layout.setContentsMargins(18, 16, 18, 16)
+    marker_layout.setSpacing(12)
+    marker_title = QtWidgets.QLabel('Name individual markers')
+    marker_title.setObjectName('pageTitle')
+    marker_hint = QtWidgets.QLabel('Refresh positions, enter names for markers you need, then save configuration.')
+    marker_hint.setObjectName('pageSubtitle')
+    marker_hint.setWordWrap(True)
+    marker_layout.addWidget(marker_title)
+    marker_layout.addWidget(marker_hint)
+
+    marker_status = QtWidgets.QHBoxLayout()
+    self.marker_service_label = QtWidgets.QLabel('Checking service…')
+    self.marker_count_label = QtWidgets.QLabel('0 markers')
+    self.marker_count_label.setObjectName('markerCount')
+    marker_status.addWidget(self.marker_service_label)
+    marker_status.addWidget(self.marker_count_label)
+    marker_status.addStretch()
+    marker_layout.addLayout(marker_status)
+
+    marker_actions = QtWidgets.QHBoxLayout()
+    marker_actions.setSpacing(10)
+    marker_actions.addWidget(QtWidgets.QLabel('Message type'))
+    self.textMsgType.setFixedWidth(120)
+    marker_actions.addWidget(self.textMsgType)
+    marker_actions.addWidget(self._spin_controls(self.msg_type_spin))
+    marker_actions.addStretch()
+    marker_actions.addWidget(self.push_refresh)
+    self.push_refresh.setText('Refresh markers')
+    marker_layout.addLayout(marker_actions)
+
+    marker_content = QtWidgets.QWidget()
+    marker_content.setObjectName('marker_content')
+    marker_rows = QtWidgets.QGridLayout(marker_content)
+    marker_rows.setContentsMargins(2, 2, 2, 2)
+    marker_rows.setHorizontalSpacing(8)
+    marker_rows.setVerticalSpacing(5)
+    self.marker_value_labels = {}
+    for column in range(2):
+      headings = QtWidgets.QWidget()
+      heading_row = QtWidgets.QHBoxLayout(headings)
+      heading_row.setContentsMargins(6, 0, 6, 0)
+      heading_row.setSpacing(4)
+      for title, width in (('#', 22), ('X (m)', 56), ('Y (m)', 56), ('Z (m)', 56)):
+        heading = QtWidgets.QLabel(title)
+        heading.setObjectName('markerHeading')
+        heading.setAlignment(Qt.AlignCenter)
+        heading.setMinimumWidth(width)
+        if title == '#':
+          heading.setFixedWidth(width)
+        heading_row.addWidget(heading, 0 if title == '#' else 1)
+      name_heading = QtWidgets.QLabel('Name')
+      name_heading.setObjectName('markerHeading')
+      heading_row.addWidget(name_heading, 2)
+      marker_rows.addWidget(headings, 0, column)
+    for index in range(1, 41):
+      marker_box = getattr(self, f'markerBox_{index}')
+      marker_box.setProperty('markerRow', True)
+      marker_box.setTitle('')
+      marker_box.setEnabled(True)
+      marker_box.setSizePolicy(QtWidgets.QSizePolicy.Expanding, QtWidgets.QSizePolicy.Fixed)
+      row = QtWidgets.QHBoxLayout(marker_box)
+      row.setContentsMargins(6, 4, 6, 4)
+      row.setSpacing(4)
+      serial = getattr(self, f'srn_{index}')
+      serial.setText(str(index))
+      serial.setObjectName('markerSerial')
+      serial.setFixedWidth(22)
+      serial.setEnabled(True)
+      row.addWidget(serial)
+      for axis in ('X', 'Y', 'Z'):
+        lcd = getattr(self, f'{axis}_{index}')
+        lcd.hide()
+        value_label = QtWidgets.QLabel('—')
+        value_label.setObjectName('markerValue')
+        value_label.setAlignment(Qt.AlignCenter)
+        value_label.setMinimumWidth(56)
+        value_label.setFixedHeight(24)
+        row.addWidget(value_label, 1)
+        self.marker_value_labels[index, axis] = value_label
+      name = getattr(self, f'name_{index}')
+      name.setProperty('markerName', True)
+      name.setPlaceholderText('Name')
+      name.setMinimumWidth(70)
+      name.setFixedHeight(24)
+      name.setEnabled(False)
+      row.addWidget(name, 2)
+      marker_box.setMinimumHeight(34)
+      marker_rows.addWidget(marker_box, (index - 1) % 20 + 1, (index - 1) // 20)
+    marker_rows.setRowStretch(21, 1)
+    self.marker_scroll = QtWidgets.QScrollArea()
+    self.marker_scroll.setWidgetResizable(True)
+    self.marker_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAsNeeded)
+    self.marker_scroll.setWidget(marker_content)
+    marker_scroll_row = QtWidgets.QHBoxLayout()
+    marker_scroll_row.setSpacing(7)
+    marker_scroll_row.addWidget(self.marker_scroll, 1)
+    marker_scroll_row.addWidget(self._scroll_controls(self.marker_scroll))
+    marker_layout.addLayout(marker_scroll_row, 1)
+
+    self.push_ok.setParent(self.marker_name_tab)
+    self.scrollArea.hide()
+    self.verticalLayoutWidget_2.hide()
+    self.groupBox_Fix.hide()
+    self.groupBox_Fix_2.hide()
+    save_row = QtWidgets.QHBoxLayout()
+    save_row.addStretch()
+    self.push_ok.setText('Save marker names')
+    save_row.addWidget(self.push_ok)
+    self.push_ok.show()
+    self.push_ok.setEnabled(False)
+    marker_layout.addLayout(save_row)
+    self._apply_theme(False)
+
+  def _scroll_controls(self, area):
+    controls = QtWidgets.QWidget()
+    controls.setObjectName('scrollControls')
+    layout = QtWidgets.QVBoxLayout(controls)
+    layout.setContentsMargins(0, 0, 0, 0)
+    layout.setSpacing(7)
+    for label, direction, tooltip in (('▲', -1, 'Scroll up'), ('▼', 1, 'Scroll down')):
+      button = QtWidgets.QToolButton()
+      button.setObjectName('scrollControl')
+      button.setText(label)
+      button.setToolTip(tooltip)
+      button.setFixedSize(34, 34)
+      button.clicked.connect(
+        lambda _checked=False, scroll_area=area, step=direction: self._scroll_area(scroll_area, step))
+      if direction > 0:
+        layout.addStretch()
+      layout.addWidget(button)
+    return controls
+
+  def _spin_controls(self, spin):
+    spin.setButtonSymbols(QtWidgets.QAbstractSpinBox.NoButtons)
+    spin.setMinimumWidth(52)
+    container = QtWidgets.QWidget()
+    layout = QtWidgets.QHBoxLayout(container)
+    layout.setContentsMargins(0, 0, 0, 0)
+    layout.setSpacing(3)
+    layout.addWidget(spin)
+    for label, step, tooltip in (('▼', -1, 'Decrease value'), ('▲', 1, 'Increase value')):
+      button = QtWidgets.QToolButton()
+      button.setObjectName('spinControl')
+      button.setText(label)
+      button.setToolTip(tooltip)
+      button.setFixedSize(27, 30)
+      button.clicked.connect(
+        lambda _checked=False, target=spin, amount=step:
+          target.stepUp() if amount > 0 else target.stepDown())
+      layout.addWidget(button)
+    return container
+
+  def _scroll_area(self, area, direction):
+    scrollbar = area.verticalScrollBar()
+    distance = max(48, scrollbar.pageStep() // 3)
+    scrollbar.setValue(scrollbar.value() + direction * distance)
+
+  def _apply_theme(self, dark):
+    self._theme_dark = dark
+    colors = {
+      'background': '#0f172a' if dark else '#f4f7fb',
+      'surface': '#1e293b' if dark else '#ffffff',
+      'text': '#e2e8f0' if dark else '#18263d',
+      'muted': '#d1deed' if dark else '#334155',
+      'border': '#8fa3bd' if dark else '#94a3b8',
+      'soft_border': '#52647c' if dark else '#b8c6d8',
+      'input_disabled': '#304158' if dark else '#e3eaf3',
+      'disabled_text': '#f1f5f9' if dark else '#1e293b',
+      'accent': '#93c5fd' if dark else '#2563eb',
+      'accent_button': '#2563eb',
+      'accent_hover': '#1d4ed8',
+      'accent_disabled': '#304158' if dark else '#e3eaf3',
+      'hover': '#334155' if dark else '#eff6ff',
+      'pressed': '#475569' if dark else '#dbeafe',
+      'selection': '#1e3a8a' if dark else '#dbeafe',
+      'danger': '#fca5a5' if dark else '#b91c1c',
+      'danger_border': '#7f1d1d' if dark else '#fecaca',
+      'danger_hover': '#3f1d27' if dark else '#fef2f2',
+      'success': '#4ade80' if dark else '#15803d',
+      'warning': '#fbbf24' if dark else '#b45309',
+      'track': '#1e293b' if dark else '#e2e8f0',
+      'handle': '#94a3b8' if dark else '#64748b',
+      'header': '#273449' if dark else '#eaf0f8',
+    }
+    self._theme_colors = colors
+    palette = self.palette()
+    disabled_foreground = QtGui.QColor(colors['disabled_text'])
+    disabled_background = QtGui.QColor(colors['input_disabled'])
+    for role in (QtGui.QPalette.WindowText, QtGui.QPalette.Text,
+                 QtGui.QPalette.ButtonText, QtGui.QPalette.PlaceholderText):
+      palette.setColor(QtGui.QPalette.Disabled, role, disabled_foreground)
+    for role in (QtGui.QPalette.Base, QtGui.QPalette.Button):
+      palette.setColor(QtGui.QPalette.Disabled, role, disabled_background)
+    self.setPalette(palette)
+    self.setStyleSheet('''
+      QWidget { color: %(text)s; font-family: "DejaVu Sans", sans-serif; font-size: 12px; }
+      QMainWindow, QWidget#control_tab, QWidget#marker_name_tab, QWidget#settings_panel,
+      QWidget#marker_content, QWidget#scrollControls { background: %(background)s; }
+      QLabel#brandLabel { color: %(accent)s; font-size: 17px; font-weight: 700; }
+      QLabel#pageTitle { color: %(text)s; font-size: 21px; font-weight: 700; }
+      QLabel#sectionTitle { color: %(text)s; font-size: 15px; font-weight: 700; }
+      QLabel#pageSubtitle, QLabel#markerCount { color: %(muted)s; }
+      QTabWidget::pane { border: 0; background: %(background)s; }
+      QTabBar::tab { background: transparent; color: %(muted)s; min-width: 180px;
+                     padding: 11px 14px; margin: 2px 4px 0 2px;
+                     border-bottom: 2px solid transparent; font-weight: 600; }
+      QTabBar::tab:selected { color: %(accent)s; border-bottom: 2px solid %(accent)s; }
+      QTabBar::tab:hover { color: %(accent)s; }
+      QTabBar::tab:disabled { color: %(disabled_text)s; }
+      QGroupBox { background: %(surface)s; border: 1px solid %(soft_border)s;
+                  border-radius: 12px; margin-top: 15px; padding-top: 12px; font-weight: 600; }
+      QGroupBox::title { subcontrol-origin: margin; subcontrol-position: top left;
+                         left: 14px; padding: 0 5px; color: %(text)s; background: %(background)s; }
+      QGroupBox::title:disabled { color: %(disabled_text)s; }
+      QGroupBox[markerRow="true"] { margin-top: 0; padding-top: 0;
+                                      border: 1px solid %(border)s; border-radius: 8px; }
+      QLabel#markerHeading, QLabel#markerSerial { color: %(muted)s; font-size: 10px; }
+      QLabel#markerValue { background: %(input_disabled)s; color: %(text)s;
+                           border: 1px solid %(border)s; border-radius: 5px;
+                           font-family: monospace; font-size: 10px; }
+      QLineEdit, QSpinBox, QTextEdit { background: %(surface)s; color: %(text)s;
+                                      border: 1px solid %(border)s; border-radius: 7px;
+                                      padding: 4px 7px; selection-background-color: %(selection)s; }
+      QLineEdit[markerName="true"] { font-size: 10px; padding: 2px 4px; }
+      QLineEdit:focus, QSpinBox:focus, QTextEdit:focus { border: 2px solid %(accent)s; }
+      QLineEdit:disabled, QSpinBox:disabled { background: %(input_disabled)s;
+                                             color: %(disabled_text)s; border-color: %(border)s; }
+      QLabel:disabled, QCheckBox:disabled, QRadioButton:disabled,
+      QGroupBox:disabled { color: %(disabled_text)s; }
+      QPushButton { background: %(surface)s; color: %(text)s; border: 1px solid %(border)s;
+                    border-radius: 8px; padding: 8px 15px; font-weight: 600; min-height: 20px; }
+      QPushButton:hover { background: %(hover)s; border-color: %(accent)s; }
+      QPushButton:pressed { background: %(pressed)s; }
+      QPushButton:disabled { background: %(input_disabled)s; color: %(disabled_text)s;
+                             border-color: %(border)s; }
+      QPushButton#start_node, QPushButton#push_refresh { background: %(accent_button)s;
+                                                        border-color: %(accent_button)s; color: white; }
+      QPushButton#start_node:hover, QPushButton#push_refresh:hover { background: %(accent_hover)s; }
+      QPushButton#start_node:disabled, QPushButton#push_refresh:disabled {
+          background: %(accent_disabled)s; border-color: %(border)s;
+          color: %(disabled_text)s; }
+      QPushButton#stop_node { color: %(danger)s; border-color: %(danger_border)s; }
+      QPushButton#stop_node:hover { background: %(danger_hover)s; }
+      QPushButton#stop_node:disabled { background: %(input_disabled)s;
+                                       color: %(disabled_text)s; border-color: %(border)s; }
+      QPushButton#themeToggle:checked { background: %(selection)s; border-color: %(accent)s; }
+      QTextEdit#outputBox { background: %(surface)s; color: %(text)s;
+                            border: 1px solid %(soft_border)s; border-radius: 10px; padding: 8px; }
+      QScrollArea { border: 0; background: %(background)s; }
+      QScrollBar:vertical { background: %(track)s; width: 14px; margin: 2px; border-radius: 6px; }
+      QScrollBar::handle:vertical { background: %(handle)s; border-radius: 5px; min-height: 30px; }
+      QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical { height: 0; }
+      QScrollBar::add-page:vertical, QScrollBar::sub-page:vertical { background: transparent; }
+      QScrollBar:horizontal { background: %(track)s; height: 14px; margin: 2px; border-radius: 6px; }
+      QScrollBar::handle:horizontal { background: %(handle)s; border-radius: 5px; min-width: 30px; }
+      QScrollBar::add-line:horizontal, QScrollBar::sub-line:horizontal { width: 0; }
+      QScrollBar::add-page:horizontal, QScrollBar::sub-page:horizontal { background: transparent; }
+      QToolButton#scrollControl, QToolButton#spinControl {
+          background: %(surface)s; color: %(text)s; border: 1px solid %(border)s;
+          border-radius: 8px; font-size: 16px; font-weight: 700; }
+      QToolButton#scrollControl:hover, QToolButton#spinControl:hover {
+          background: %(hover)s; border-color: %(accent)s; }
+      QToolButton#scrollControl:pressed, QToolButton#spinControl:pressed {
+          background: %(pressed)s; }
+      QToolButton:disabled { background: %(input_disabled)s;
+                             color: %(disabled_text)s; border-color: %(border)s; }
+      QLCDNumber { background: %(input_disabled)s; color: %(accent)s;
+                   border: 1px solid %(border)s; border-radius: 5px; }
+      QToolTip { background: %(surface)s; color: %(text)s; border: 1px solid %(border)s; }
+      QCheckBox { spacing: 8px; }
+      QCheckBox::indicator { width: 16px; height: 16px; }
+      QCheckBox::indicator:unchecked:disabled, QRadioButton::indicator:unchecked:disabled {
+          background: %(input_disabled)s; border: 2px solid %(border)s; }
+      QCheckBox::indicator:checked:disabled, QRadioButton::indicator:checked:disabled {
+          background: %(accent)s; border: 2px solid %(border)s; }
+    ''' % colors)
+    self.theme_toggle.setText('Light mode' if dark else 'Dark mode')
+    if hasattr(self, '_launch_status_text'):
+      self._set_launch_status(self._launch_status_text, self._launch_status_tone)
+    self._style_marker_service(getattr(self, '_marker_service_tone', 'muted'))
+    self._render_logs()
+
+  def _style_marker_service(self, tone):
+    self._marker_service_tone = tone
+    self.marker_service_label.setStyleSheet(
+      f'color: {self._theme_colors[tone]}; font-weight: 600;')
+
+  def _layout_settings_groups(self):
+    for group, title in ((self.parameters, 'Parameters'),
+                         (self.connection_settings, 'Connection settings'),
+                         (self.publisher_setting, 'Publisher settings'),
+                         (self.ros_network, 'ROS network'),
+                         (self.logging_settings, 'Logging settings')):
+      group.setTitle(title)
+      group.setSizePolicy(QtWidgets.QSizePolicy.Expanding, QtWidgets.QSizePolicy.Fixed)
+
+    self.label_11.setText('World frame')
+    self.label_12.setText('Node name')
+    parameters = QtWidgets.QGridLayout(self.parameters)
+    parameters.setContentsMargins(14, 22, 14, 12)
+    parameters.setHorizontalSpacing(12)
+    parameters.setVerticalSpacing(8)
+    parameters.addWidget(self.label_11, 0, 0)
+    parameters.addWidget(self.textFrameName, 0, 1)
+    parameters.addWidget(self.label_12, 1, 0)
+    parameters.addWidget(self.textNodeName, 1, 1)
+    parameters.setColumnStretch(1, 1)
+
+    self.label_5.setText('Server IP')
+    self.label_6.setText('Client IP')
+    self.label_7.setText('Server type')
+    self.label_8.setText('Multicast address')
+    self.label_9.setText('Command port')
+    self.label_10.setText('Data port')
+    self.textServerIP.setToolTip('Enter full server IPv4 address or its last octet on the selected client network.')
+    self.textClientIP.setToolTip('Choose a detected interface or enter the client IPv4 address.')
+    self.client_ip_spin.setFixedWidth(58)
+    self.textCommandPort.setMinimumWidth(66)
+    self.textDataPort.setMinimumWidth(66)
+    connection = QtWidgets.QGridLayout(self.connection_settings)
+    connection.setContentsMargins(14, 22, 14, 12)
+    connection.setHorizontalSpacing(8)
+    connection.setVerticalSpacing(7)
+    connection.addWidget(self.label_5, 0, 0)
+    connection.addWidget(self.textServerIP, 0, 1)
+    connection.addWidget(self.label_6, 1, 0)
+    connection.addWidget(self.textClientIP, 1, 1)
+    connection.addWidget(QtWidgets.QLabel('Interface'), 2, 0)
+    connection.addWidget(self._spin_controls(self.client_ip_spin), 2, 1, Qt.AlignLeft)
+    connection.addWidget(self.label_7, 3, 0)
+    server_type = QtWidgets.QVBoxLayout()
+    server_type.setSpacing(0)
+    server_type.addWidget(self.multicast_radio)
+    server_type.addWidget(self.unicast_radio)
+    connection.addLayout(server_type, 3, 1)
+    connection.addWidget(self.label_8, 4, 0)
+    connection.addWidget(self.textMulticastAddr, 4, 1)
+    connection.addWidget(self.label_9, 5, 0)
+    connection.addWidget(self.textCommandPort, 5, 1)
+    connection.addWidget(self.label_10, 6, 0)
+    connection.addWidget(self.textDataPort, 6, 1)
+    connection.setColumnStretch(1, 1)
+
+    for checkbox, text in ((self.pub_rb, 'Rigid bodies'),
+                           (self.pub_rbm, 'Rigid body markers'),
+                           (self.pub_im, 'Individual markers'),
+                           (self.pub_pc, 'Point cloud'),
+                           (self.pub_rbwmc, 'Body with marker config (coming soon)')):
+      checkbox.setText(text)
+    self.pub_rbwmc.setEnabled(False)
+    self.pub_rbwmc.setToolTip('This publisher is not supported yet.')
+    publishers = QtWidgets.QVBoxLayout(self.publisher_setting)
+    publishers.setContentsMargins(14, 20, 14, 12)
+    publishers.setSpacing(4)
+    for checkbox in (self.pub_rb, self.pub_rbm, self.pub_im, self.pub_pc, self.pub_rbwmc):
+      publishers.addWidget(checkbox)
+
+    network = QtWidgets.QHBoxLayout(self.ros_network)
+    network.setContentsMargins(14, 20, 14, 12)
+    network.setSpacing(12)
+    network.addWidget(self.label_13)
+    network.addWidget(self._spin_controls(self.domain_id_spin))
+    network.addStretch()
+
+    logging = QtWidgets.QHBoxLayout(self.logging_settings)
+    logging.setContentsMargins(14, 20, 14, 12)
+    logging.setSpacing(16)
+    for checkbox in (self.log_internal, self.log_frames, self.log_latencies):
+      logging.addWidget(checkbox)
+    logging.addStretch()
+
+  def _set_launch_status(self, text, tone):
+    self._launch_status_text = text
+    self._launch_status_tone = tone
+    self.launch_status_label.setText(text)
+    self.launch_status_label.setStyleSheet(
+      f'background: {self._theme_colors["surface"]}; color: {self._theme_colors[tone]}; '
+      f'border: 1px solid {self._theme_colors["soft_border"]}; '
+      'border-radius: 10px; padding: 9px 12px; font-weight: 700;')
+    self.start_node.setEnabled(not self.is_running)
+    self.stop_node.setEnabled(self.is_running)
+
   def Log(self,type:str="",msg=''):
-    html_msg = msg
-    if type=="info":
-      html_msg = """<div style="color: #656565">[INFO]</div>""" +msg
-    if type=="error":
-      html_msg = """<div style="color:red">[ERROR]</div>""" +msg
-    if type=="warn":
-      html_msg = """<div style="color: #ffae42">[WARN]</div>""" +msg
-    if type=="block":
-      html_msg = """<div style="color: #656565">--------------------</div>"""
-    self.outputBox.append(html_msg)
+    self._log_entries.append((type, str(msg)))
+    self.outputBox.append(self._format_log(type, msg))
     self.outputBox.moveCursor(QtGui.QTextCursor.End)
     self.outputBox.ensureCursorVisible()
     self.outputBox.verticalScrollBar().setValue(self.outputBox.verticalScrollBar().maximum())
+
+  def _format_log(self, type, msg):
+    if type == 'block':
+      return f'<span style="color:{self._theme_colors["muted"]}">────────────────────────</span>'
+    tone = {'error': 'danger', 'warn': 'warning'}.get(type, 'text')
+    color = self._theme_colors[tone]
+    label = type.upper() if type in ('info', 'error', 'warn') else 'INFO'
+    return (f'<span style="color:{self._theme_colors["text"]}">'
+            f'<span style="color:{color};font-weight:600">[{label}]</span> '
+            f'{html.escape(str(msg))}</span>')
+
+  def _render_logs(self):
+    self.outputBox.clear()
+    for type, msg in self._log_entries:
+      self.outputBox.append(self._format_log(type, msg))
+    self.outputBox.moveCursor(QtGui.QTextCursor.End)
+
+  def _clear_logs(self):
+    self._log_entries.clear()
+    self.outputBox.clear()
 
   def _is_valid_ipv4(self, ip_text: str) -> bool:
     octets = str(ip_text).strip().split('.')
@@ -328,9 +842,13 @@ class PyQt5Widget(QtWidgets.QMainWindow):
     return ok
 
   def _refresh_marker_service_status(self):
+    if self.marker_refresh_thread is not None:
+      return
     is_ready = self.node.marker_service_ready(timeout_sec=0.0)
     self.marker_service_available = is_ready
     self.push_refresh.setEnabled(is_ready)
+    self.marker_service_label.setText('Service ready' if is_ready else 'Service unavailable')
+    self._style_marker_service('success' if is_ready else 'warning')
 
     if is_ready:
       self.push_refresh.setToolTip('Refresh marker poses from marker_poses_server.')
@@ -347,20 +865,13 @@ class PyQt5Widget(QtWidgets.QMainWindow):
       self._last_marker_service_state = is_ready
 
   def _clear_marker_display(self):
-    for i in range(1, 41):
-      marker_box = getattr(self, f'markerBox_{i}', None)
-      x_lcd = getattr(self, f'X_{i}', None)
-      y_lcd = getattr(self, f'Y_{i}', None)
-      z_lcd = getattr(self, f'Z_{i}', None)
-
-      if marker_box is not None:
-        marker_box.setEnabled(False)
-      if x_lcd is not None:
-        x_lcd.display(0.0)
-      if y_lcd is not None:
-        y_lcd.display(0.0)
-      if z_lcd is not None:
-        z_lcd.display(0.0)
+    self.marker_count_label.setText('0 markers')
+    self.push_ok.setEnabled(False)
+    for index in range(1, 41):
+      getattr(self, f'name_{index}').setEnabled(False)
+      for axis in ('X', 'Y', 'Z'):
+        self.marker_value_labels[index, axis].setText('—')
+        self.marker_value_labels[index, axis].setToolTip('')
 
   def _resolve_client_ip_text(self, client_text: str) -> str:
     value = str(client_text).strip()
@@ -418,6 +929,7 @@ class PyQt5Widget(QtWidgets.QMainWindow):
     self.launch_proc = pid
     self.launch_pgid = pgid
     self.is_running = True
+    self._set_launch_status('Running', 'success')
     self.Log('info', f' Started natnet launch process (pid={pid}, pgid={pgid})')
     self.node.get_logger().info(f'Started natnet launch process (pid={pid}, pgid={pgid})')
 
@@ -437,12 +949,15 @@ class PyQt5Widget(QtWidgets.QMainWindow):
       self.Log('error', f' NatNet launch exited with code {return_code}')
       self.node.get_logger().error(f'NatNet launch exited with code {return_code}')
     self._clear_launch_state()
+    self._set_launch_status('Stopped' if return_code == 0 else 'Launch failed',
+                            'muted' if return_code == 0 else 'danger')
 
   def _clear_launch_state(self):
     self.launch_proc = None
     self.launch_pgid = None
     self.is_running = False
     self.start_node_thread = None
+    self._set_launch_status('Stopped', 'muted')
 
   def _is_tracked_process_alive(self) -> bool:
     if self.start_node_thread and self.start_node_thread.proc is not None:
@@ -522,6 +1037,11 @@ class PyQt5Widget(QtWidgets.QMainWindow):
   def closeEvent(self, event):
     if self.marker_service_check_timer.isActive():
       self.marker_service_check_timer.stop()
+    if self.marker_refresh_thread is not None:
+      if not self.marker_refresh_thread.wait(22000):
+        self.Log('warn', ' Marker refresh is still stopping. Close the window after it finishes.')
+        event.ignore()
+        return
     self.shutdown_launch_process('GUI closed')
     super().closeEvent(event)
 
@@ -583,6 +1103,7 @@ class PyQt5Widget(QtWidgets.QMainWindow):
       self.start_node_thread.log_line_signal.connect(self._on_launch_log_line)
       self.start_node_thread.finished_signal.connect(self._on_launch_finished)
       self.is_running = True
+      self._set_launch_status('Starting…', 'accent')
       self.start_node_thread.start()
       self.Log('info', ' Starting natnet launch process...')
       self.node.get_logger().info('Starting natnet launch process...')
@@ -847,31 +1368,18 @@ class PyQt5Widget(QtWidgets.QMainWindow):
       return
 
     visible_count = min(40, num_of_markers)
-    for i in range(1, 41):
-      marker_box = getattr(self, f'markerBox_{i}', None)
-      x_lcd = getattr(self, f'X_{i}', None)
-      y_lcd = getattr(self, f'Y_{i}', None)
-      z_lcd = getattr(self, f'Z_{i}', None)
-
-      if marker_box is not None:
-        marker_box.setEnabled(i <= visible_count)
-
-      if i <= visible_count:
-        if x_lcd is not None:
-          x_lcd.display(x_position[i-1])
-        if y_lcd is not None:
-          y_lcd.display(y_position[i-1])
-        if z_lcd is not None:
-          z_lcd.display(z_position[i-1])
-      else:
-        if x_lcd is not None:
-          x_lcd.display(0.0)
-        if y_lcd is not None:
-          y_lcd.display(0.0)
-        if z_lcd is not None:
-          z_lcd.display(0.0)
+    for index in range(1, 41):
+      visible = index <= visible_count
+      getattr(self, f'name_{index}').setEnabled(visible)
+      for axis, values in (('X', x_position), ('Y', y_position), ('Z', z_position)):
+        label = self.marker_value_labels[index, axis]
+        label.setText(f'{values[index - 1]:.3f}' if visible else '—')
+        label.setToolTip(str(values[index - 1]) if visible else '')
 
     self.num_of_markers = num_of_markers
+    self.marker_count_label.setText(
+      f'{num_of_markers} markers' if num_of_markers <= 40 else f'Showing 40 of {num_of_markers} markers')
+    self.push_ok.setEnabled(visible_count > 0)
     self.x_position = x_position
     self.y_position = y_position
     self.z_position = z_position
@@ -913,10 +1421,13 @@ class PyQt5Widget(QtWidgets.QMainWindow):
       with open(self.config_file,'w') as f:
         yaml.dump({self.name: {'ros__parameters':self.natnet_params}},f,indent=2,default_flow_style=False)
         f.close()
+      self.Log('info', f' Saved {len(object_names["object_names"])} marker names.')
     else:
       self.Log('error','Number of markers are not recieved. Something went wrong.')
 
   def call_MarkerPoses_srv(self):
+    if self.marker_refresh_thread is not None:
+      return
     if not self.node.marker_service_ready(timeout_sec=0.1):
       self.marker_service_available = False
       self.push_refresh.setEnabled(False)
@@ -927,14 +1438,32 @@ class PyQt5Widget(QtWidgets.QMainWindow):
 
     self.set_conn_params('marker_poses_server')
     if self.error_pass:
-      try:
-        res = self.node.request_markerposes(timeout_sec=2.0)
-        self.set_lcds(res.num_of_markers,res.x_position,res.y_position,res.z_position)
-      except RuntimeError as e:
-        self.Log('error','Service call failed: '+str(e))
-        self.node.get_logger().error('Service call failed: '+str(e))
-      except Exception as e:
-        self._log_exception('Unexpected error during marker pose service call', e)
+      self.marker_service_check_timer.stop()
+      self.push_refresh.setEnabled(False)
+      self.marker_service_label.setText('Refreshing…')
+      self._style_marker_service('accent')
+      self.marker_refresh_thread = MarkerRefreshThread(self.node)
+      self.marker_refresh_thread.result_signal.connect(self._on_marker_refresh_result)
+      self.marker_refresh_thread.error_signal.connect(self._on_marker_refresh_error)
+      self.marker_refresh_thread.finished.connect(self._finish_marker_refresh)
+      self.marker_refresh_thread.start()
+
+  def _on_marker_refresh_result(self, response):
+    self.set_lcds(response.num_of_markers, response.x_position, response.y_position, response.z_position)
+
+  def _on_marker_refresh_error(self, message):
+    self._clear_marker_display()
+    self.num_of_markers = 0
+    self.x_position = None
+    self.y_position = None
+    self.z_position = None
+    self.Log('error', 'Service call failed: ' + message)
+    self.node.get_logger().error('Service call failed: ' + message)
+
+  def _finish_marker_refresh(self):
+    self.marker_refresh_thread = None
+    self._refresh_marker_service_status()
+    self.marker_service_check_timer.start()
 
 #----------------------------------------------------------------------------------------
 # LOGGING RELATED

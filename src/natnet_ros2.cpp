@@ -47,11 +47,18 @@ NatNetNode::NatNetNode(rclcpp::NodeOptions& node_options) : LifecycleNode("natne
 
 NatNetNode::~NatNetNode()
 {
-    if (g_pClient)
-    {
-        g_pClient->Disconnect();
-        delete g_pClient;
-    }
+    cleanup_client();
+}
+
+void NatNetNode::cleanup_client()
+{
+    if (!g_pClient)
+        return;
+
+    g_pClient->SetFrameReceivedCallback(nullptr, nullptr);
+    g_pClient->Disconnect();
+    delete g_pClient;
+    g_pClient = nullptr;
 }
 
 void NatNetNode::get_node_params()
@@ -83,6 +90,7 @@ void NatNetNode::get_node_params()
         for (int i=0 ; i < (int)object_names.size() ; i++)
         {
             std::vector<double> tmp_pose;
+            tmp_obj.marker_config = 0;
             declare_parameter(object_names[i]+".pose.position", tmp_pose);
             declare_parameter(object_names[i]+".marker_config", tmp_obj.marker_config);
             get_parameter(object_names[i]+".pose.position", tmp_pose);
@@ -96,8 +104,11 @@ void NatNetNode::get_node_params()
             tmp_obj.y = tmp_pose[1];
             tmp_obj.z = tmp_pose[2];
             tmp_obj.detected = false;
+            if (!get_parameter(object_names[i]+".marker_config", tmp_obj.marker_config))
+            {
+                RCLCPP_WARN(get_logger(), "Unable to get marker_config for object: %s", object_names[i].c_str());
+            }
             object_list.push_back(tmp_obj);
-            get_parameter(object_names[i]+"/marker_config",tmp_obj.marker_config);
             RCLCPP_INFO(get_logger(),"Got initial position of %s : [%f %f %f]",tmp_obj.name.c_str(),tmp_obj.x , tmp_obj.y, tmp_obj.z);
         }
         object_list_prev = object_list;
@@ -370,6 +381,8 @@ std::chrono::nanoseconds NatNetNode::get_latency_info(sFrameOfMocapData * data)
 void NatNetNode::process_frame(sFrameOfMocapData* data)
 {
     frame_delay = rclcpp::Duration(get_latency_info(data));
+    unlabled_count = 0;
+    msgPointcloud.points.clear();
 
     RCLCPP_INFO_EXPRESSION(get_logger(),log_frames, "FrameID : %d", data->iFrame);
     RCLCPP_INFO_EXPRESSION(get_logger(),log_frames, "Rigid Bodies [Count=%d]", data->nRigidBodies);
@@ -403,20 +416,35 @@ void NatNetNode::process_frame(sFrameOfMocapData* data)
         {
             process_rigid_body_marker(data->LabeledMarkers[i]);
         }
-        if(pub_pointcloud)
-        {
-            msgPointcloud.header.frame_id= global_frame;
-            msgPointcloud.header.stamp = remove_latency ? this->get_clock()->now()-frame_delay : this->get_clock()->now();
-            PointcloudPub->publish(msgPointcloud);
-        }
-        unlabled_count=0;
-        msgPointcloud.points.clear();
+    }
+
+    if(pub_pointcloud && PointcloudPub)
+    {
+        msgPointcloud.header.frame_id = global_frame;
+        msgPointcloud.header.stamp = remove_latency ? this->get_clock()->now()-frame_delay : this->get_clock()->now();
+        PointcloudPub->publish(msgPointcloud);
     }
 
 }
 
 void NatNetNode::process_rigid_body(sRigidBodyData &data)
 {
+    const auto body_name_it = ListRigidBodies.find(data.ID);
+    if (body_name_it == ListRigidBodies.end())
+    {
+        RCLCPP_WARN_THROTTLE(get_logger(), *this->get_clock(), 5000,
+            "No publisher metadata for rigid body ID %d", data.ID);
+        return;
+    }
+
+    const auto publisher_it = RigidbodyPub.find(body_name_it->second);
+    if (publisher_it == RigidbodyPub.end() || !publisher_it->second)
+    {
+        RCLCPP_WARN_THROTTLE(get_logger(), *this->get_clock(), 5000,
+            "No publisher for rigid body ID %d", data.ID);
+        return;
+    }
+
     geometry_msgs::msg::PoseStamped msgRigidBodyPose;
     msgRigidBodyPose.header.frame_id = global_frame;
     msgRigidBodyPose.header.stamp = remove_latency ? this->get_clock()->now()-frame_delay : this->get_clock()->now();
@@ -427,12 +455,12 @@ void NatNetNode::process_rigid_body(sRigidBodyData &data)
     msgRigidBodyPose.pose.orientation.y = data.qy;
     msgRigidBodyPose.pose.orientation.z = data.qz;
     msgRigidBodyPose.pose.orientation.w = data.qw;
-    RigidbodyPub[ListRigidBodies[data.ID]]->publish(msgRigidBodyPose);
+    publisher_it->second->publish(msgRigidBodyPose);
     // creating tf frame to visualize in the rviz
     geometry_msgs::msg::TransformStamped msgTFRigidBodies;
     msgTFRigidBodies.header.stamp = remove_latency ? this->get_clock()->now()-frame_delay : this->get_clock()->now();
     msgTFRigidBodies.header.frame_id = global_frame;
-    msgTFRigidBodies.child_frame_id = ListRigidBodies[data.ID];
+    msgTFRigidBodies.child_frame_id = body_name_it->second;
     msgTFRigidBodies.transform.translation.x = data.x;
     msgTFRigidBodies.transform.translation.y = data.y;
     msgTFRigidBodies.transform.translation.z = data.z;
@@ -515,7 +543,16 @@ void NatNetNode::process_rigid_body_marker(sMarker &data)
     msgMarkerPose.point.y = data.y;
     msgMarkerPose.point.z = data.z;
 
-    RigidbodyMarkerPub[std::to_string(modelID)+std::to_string(markerID)]->publish(msgMarkerPose);
+    const std::string marker_key = std::to_string(modelID)+std::to_string(markerID);
+    const auto publisher_it = RigidbodyMarkerPub.find(marker_key);
+    if (publisher_it == RigidbodyMarkerPub.end() || !publisher_it->second)
+    {
+        RCLCPP_WARN_THROTTLE(get_logger(), *this->get_clock(), 5000,
+            "No publisher for rigid body marker model ID %d, marker ID %d", modelID, markerID);
+        return;
+    }
+
+    publisher_it->second->publish(msgMarkerPose);
 }
 
 void NatNetNode::del_info()
@@ -530,9 +567,14 @@ void NatNetNode::del_info()
 
 CallbackReturnT NatNetNode::on_configure(const rclcpp_lifecycle::State & state)
 {
+    cleanup_client();
     g_pClient = new NatNetClient();
     if(!this->connect())
-        {RCLCPP_ERROR(get_logger(),"Unable to connect"); this->~NatNetNode() ;rclcpp::shutdown();}
+    {
+        RCLCPP_ERROR(get_logger(),"Unable to connect");
+        cleanup_client();
+        return CallbackReturnT::FAILURE;
+    }
     this->get_info();
     RCLCPP_INFO(get_logger(), "Configured!\n");
     return CallbackReturnT::SUCCESS;
@@ -576,10 +618,9 @@ CallbackReturnT NatNetNode::on_activate(const rclcpp_lifecycle::State & state)
 
 CallbackReturnT NatNetNode::on_shutdown(const rclcpp_lifecycle::State & state)
 {
+    cleanup_client();
     this->del_info();
     RCLCPP_INFO(get_logger(), "Shutdown!\n");
-    //g_pClient->Disconnect();
-    this->~NatNetNode();
     return CallbackReturnT::SUCCESS;
 }
 
