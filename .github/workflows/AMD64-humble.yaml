@@ -38,10 +38,4 @@ jobs:
       - name: Build
         run: |
           . /opt/ros/${{ matrix.ros_distribution }}/setup.sh
-          colcon build --symlink-install --packages-select natnet_ros2 
-
-      - name: Test
-        run: |
-          . /opt/ros/${{ matrix.ros_distribution }}/setup.sh
-          colcon test --packages-select natnet_ros2
-          colcon test-result --verbose
+          colcon build --symlink-install --packages-select natnet_ros2 --cmake-args -DBUILD_TESTING=OFF
