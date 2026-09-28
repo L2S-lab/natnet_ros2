@@ -17,7 +17,10 @@
 
 #include "rclcpp/rclcpp.hpp"
 #include "natnet_ros2/srv/marker_poses.hpp"
+#include <condition_variable>
 #include <iostream>
+#include <mutex>
+#include <utility>
 #include <vector>
 
 #include <NatNetCAPI.h>
@@ -32,9 +35,7 @@ public:
 
 private:
     rclcpp::Service<natnet_ros2::srv::MarkerPoses>::SharedPtr service_;
-    //std::shared_ptr<natnet_ros_cpp::srv::MarkerPoses::Response> response;
-    natnet_ros2::srv::MarkerPoses::Response response;
-    NatNetClient* natnet_client_;
+    NatNetClient* natnet_client_{nullptr};
     sNatNetClientConnectParams g_connectParams;
     std::string serverIP;
     std::string clientIP;
@@ -43,6 +44,12 @@ private:
     int serverCommandPort;
     int serverDataPort;
     ConnectionType kDefaultConnectionType = ConnectionType_Multicast;
+    std::mutex response_mutex_;
+    std::condition_variable response_cv_;
+    bool frame_received_{false};
+    std::vector<double> x_position_;
+    std::vector<double> y_position_;
+    std::vector<double> z_position_;
 
     void frame_callback(sFrameOfMocapData *data);
     static void static_frame_callback(sFrameOfMocapData *data, void *pUserData);
@@ -82,29 +89,38 @@ GetMarkerPosesServer::~GetMarkerPosesServer()
 {
     if (natnet_client_)
     {
+        natnet_client_->SetFrameReceivedCallback(nullptr, nullptr);
         natnet_client_->Disconnect();
         delete natnet_client_;
+        natnet_client_ = nullptr;
     }
 }
 
 void GetMarkerPosesServer::frame_callback(sFrameOfMocapData *data)
 {
-    response.x_position.clear();
-    response.y_position.clear();
-    response.z_position.clear();
-    response.num_of_markers = 0;
+    std::vector<double> x_position;
+    std::vector<double> y_position;
+    std::vector<double> z_position;
 
     for (int i = 0; i < data->nLabeledMarkers; i++)
     {
         bool bUnlabeled = ((data->LabeledMarkers[i].params & 0x10) != 0);
         if (bUnlabeled)
         {
-            response.x_position.push_back(data->LabeledMarkers[i].x);
-            response.y_position.push_back(data->LabeledMarkers[i].y);
-            response.z_position.push_back(data->LabeledMarkers[i].z);
-            response.num_of_markers += 1;
+            x_position.push_back(data->LabeledMarkers[i].x);
+            y_position.push_back(data->LabeledMarkers[i].y);
+            z_position.push_back(data->LabeledMarkers[i].z);
         }
     }
+
+    {
+        std::lock_guard<std::mutex> lock(response_mutex_);
+        x_position_ = std::move(x_position);
+        y_position_ = std::move(y_position);
+        z_position_ = std::move(z_position);
+        frame_received_ = true;
+    }
+    response_cv_.notify_one();
 }
 
 bool GetMarkerPosesServer::update(const std::shared_ptr<natnet_ros2::srv::MarkerPoses::Request> req,
@@ -112,6 +128,12 @@ bool GetMarkerPosesServer::update(const std::shared_ptr<natnet_ros2::srv::Marker
 {
     natnet_client_->Disconnect();
     set_conn_params();
+
+    {
+        std::lock_guard<std::mutex> lock(response_mutex_);
+        frame_received_ = false;
+    }
+    natnet_client_->SetFrameReceivedCallback(static_frame_callback, this);
 
     int iResult = natnet_client_->Connect(g_connectParams);
     if (iResult != ErrorCode_OK)
@@ -123,21 +145,30 @@ bool GetMarkerPosesServer::update(const std::shared_ptr<natnet_ros2::srv::Marker
     {
         RCLCPP_INFO(this->get_logger(), "Client initialized and ready.");
     }
-    if (rclcpp::ok())
+    if (!rclcpp::ok())
     {
-    rclcpp::Time begin = this->get_clock()->now();
-    natnet_client_->SetFrameReceivedCallback(static_frame_callback, this);
-    rclcpp::sleep_for(std::chrono::milliseconds(500));
-    auto dummy_request_id = std::make_shared<rmw_request_id_t>();
-    res->num_of_markers = response.num_of_markers;
-    res->x_position = response.x_position;
-    res->y_position = response.y_position;
-    res->z_position = response.z_position;
+        natnet_client_->Disconnect();
+        return false;
+    }
+
+    std::unique_lock<std::mutex> lock(response_mutex_);
+    const bool received = response_cv_.wait_for(
+        lock, std::chrono::seconds(2), [this]() { return frame_received_; });
+    if (!received)
+    {
+        lock.unlock();
+        natnet_client_->Disconnect();
+        RCLCPP_WARN(this->get_logger(), "Timed out waiting for a fresh NatNet frame.");
+        return false;
+    }
+
+    res->num_of_markers = static_cast<int64_t>(x_position_.size());
+    res->x_position = x_position_;
+    res->y_position = y_position_;
+    res->z_position = z_position_;
+    lock.unlock();
     natnet_client_->Disconnect();
     return true;
-    }
-    natnet_client_->Disconnect();
-    return false;
 }
 
 void GetMarkerPosesServer::set_conn_params()

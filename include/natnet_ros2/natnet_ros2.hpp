@@ -66,6 +66,7 @@ public:
 
     bool disconnect();
     bool connect();
+    void cleanup_client();
     void get_conn_params();
     void get_node_params();
     void set_conn_params();
@@ -84,7 +85,7 @@ public:
 protected:
     // Your existing member variables and methods go here
 
-    NatNetClient* g_pClient;
+    NatNetClient* g_pClient{nullptr};
     sNatNetClientConnectParams g_connectParams;
     ConnectionType g_ConnectionType = ConnectionType_Multicast;
     sServerDescription g_serverDescription;

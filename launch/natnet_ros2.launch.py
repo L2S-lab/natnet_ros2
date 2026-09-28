@@ -13,6 +13,14 @@ from launch.actions import EmitEvent
 from launch_ros.events.lifecycle import ChangeState
 from launch.events.matchers import matches_action
 
+def parse_bool(value, name):
+    normalized = value.strip().lower()
+    if normalized in ('true', '1', 'yes', 'on'):
+        return True
+    if normalized in ('false', '0', 'no', 'off'):
+        return False
+    raise RuntimeError(f"Invalid boolean value for {name}: {value}")
+
 def node_fn(context,*args, **kwargs):
     serverIP = LaunchConfiguration('serverIP')
     clientIP = LaunchConfiguration('clientIP')
@@ -53,7 +61,7 @@ def node_fn(context,*args, **kwargs):
             {"individual_marker_msg_type" : immt},
         ]
     conf_file_path = None
-    if pub_individual_marker.perform(context):
+    if parse_bool(pub_individual_marker.perform(context), 'pub_individual_marker'):
         if len(conf_file.perform(context))==0 or conf_file.perform(context).split('.')[-1]!="yaml":
             raise RuntimeError("Provide yaml file for initial configuration")
         conf_file_path = os.path.join(get_package_share_directory(
@@ -81,7 +89,7 @@ def node_fn(context,*args, **kwargs):
         )
     )
     ld.append(driver_configure)
-    if activate.perform(context):
+    if parse_bool(activate.perform(context), 'activate'):
         driver_activate = EmitEvent(
         event=ChangeState(
             lifecycle_node_matcher=matches_action(node),
@@ -106,12 +114,12 @@ def generate_launch_description():
         DeclareLaunchArgument('global_frame', default_value="world"),
         DeclareLaunchArgument('remove_latency',default_value="false"),
         DeclareLaunchArgument('pub_rigid_body', default_value="false"),
-        DeclareLaunchArgument('pub_rigid_body_marker', default_value="False"),
-        DeclareLaunchArgument('pub_individual_marker', default_value="False"),
-        DeclareLaunchArgument('pub_pointcloud', default_value="False"),
-        DeclareLaunchArgument('log_internals', default_value="False"),
-        DeclareLaunchArgument('log_frames', default_value="False"),
-        DeclareLaunchArgument('log_latencies', default_value="False"),
+        DeclareLaunchArgument('pub_rigid_body_marker', default_value="false"),
+        DeclareLaunchArgument('pub_individual_marker', default_value="false"),
+        DeclareLaunchArgument('pub_pointcloud', default_value="false"),
+        DeclareLaunchArgument('log_internals', default_value="false"),
+        DeclareLaunchArgument('log_frames', default_value="false"),
+        DeclareLaunchArgument('log_latencies', default_value="false"),
         DeclareLaunchArgument('conf_file', default_value="initiate.yaml"),
         DeclareLaunchArgument('node_name', default_value="natnet_ros"),
         DeclareLaunchArgument('activate', default_value="false"),
